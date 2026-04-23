@@ -135,20 +135,22 @@ overall_score: 0-100, di mana 100 = sempurna tanpa temuan kritikal/minor."""
 def get_gsheet_client():
     """
     Buat koneksi ke Google Sheets menggunakan credentials dari st.secrets.
-    Kembalikan (client, spreadsheet) atau (None, None) jika tidak terkonfigurasi.
+    Kembalikan (client, spreadsheet, error_msg).
     """
+    # Cek apakah secrets ada
+    if "gcp_service_account" not in st.secrets:
+        return None, None, "KEY_MISSING: 'gcp_service_account' tidak ditemukan di Secrets"
+    if "spreadsheet_id" not in st.secrets:
+        return None, None, "KEY_MISSING: 'spreadsheet_id' tidak ditemukan di Secrets"
     try:
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = Credentials.from_service_account_info(creds_dict, scopes=GSPREAD_SCOPES)
         client = gspread.authorize(creds)
         spreadsheet_id = st.secrets["spreadsheet_id"]
         spreadsheet = client.open_by_key(spreadsheet_id)
-        return client, spreadsheet
-    except KeyError:
-        return None, None
+        return client, spreadsheet, None
     except Exception as e:
-        st.warning(f"⚠️ Google Sheets tidak terhubung: {e}")
-        return None, None
+        return None, None, str(e)
 
 
 def get_or_create_sheet(spreadsheet, sheet_name: str, headers: list):
@@ -556,9 +558,7 @@ def main():
 <hr style="border-color:#dde3ea;">""", unsafe_allow_html=True)
 
     # ── KONEKSI GOOGLE SHEETS ──
-    _, spreadsheet = get_gsheet_client()
-
-    # Tampilkan status koneksi di sidebar
+    _, spreadsheet, gs_error = get_gsheet_client()
     gs_connected = spreadsheet is not None
 
     # ── LOAD DATA ──
@@ -578,12 +578,15 @@ def main():
     <span style="color:#6b7280;font-size:11px;">Data tersimpan permanen</span>
 </div>""", unsafe_allow_html=True)
         else:
-            st.markdown("""
+            error_detail = gs_error or "Secrets belum diisi"
+            st.markdown(f"""
 <div style="background:#fff8e6;border:1px solid #f5e0a0;border-radius:8px;
             padding:10px 12px;margin-bottom:12px;font-size:12px;">
     🟡 <strong>Google Sheets</strong> tidak terkonfigurasi<br>
     <span style="color:#6b7280;font-size:11px;">Data hanya tersimpan sementara (session)</span>
 </div>""", unsafe_allow_html=True)
+            with st.expander("🔍 Lihat detail error", expanded=True):
+                st.code(error_detail, language="text")
 
         st.markdown("### 🔑 Claude API Key")
         api_key = st.text_input(
