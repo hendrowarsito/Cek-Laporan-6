@@ -210,16 +210,55 @@ def call_claude(api_key: str, mode_instruction: str, check_items: list[str], doc
 
     raw_text = response.content[0].text
 
-    # Parse JSON
-    try:
-        # Coba langsung
-        return json.loads(raw_text), raw_text
-    except json.JSONDecodeError:
-        # Cari blok JSON di dalam teks
-        m = re.search(r"\{[\s\S]*\}", raw_text)
-        if m:
-            return json.loads(m.group()), raw_text
-        raise ValueError(f"Claude tidak mengembalikan JSON valid.\n\nRaw:\n{raw_text}")
+    # ── PARSE JSON: 4-lapis fallback ──
+    def try_parse(text):
+        try:
+            return json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    def fix_json(text):
+        # Hapus trailing comma sebelum } atau ]
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+        # Hapus komentar // ...
+        text = re.sub(r"//[^\n]*", "", text)
+        return text
+
+    parsed = None
+
+    # Lapis 1: parse langsung
+    parsed = try_parse(raw_text)
+
+    # Lapis 2: strip markdown fences ```json ... ```
+    if parsed is None:
+        stripped = re.sub(r"```(?:json)?\s*([\s\S]*?)```", r"\1", raw_text).strip()
+        parsed = try_parse(stripped)
+
+    # Lapis 3: ekstrak blok { ... } terpanjang
+    if parsed is None:
+        for m in re.finditer(r"\{[\s\S]*\}", raw_text):
+            candidate = m.group()
+            parsed = try_parse(candidate)
+            if parsed:
+                break
+
+    # Lapis 4: perbaiki JSON lalu coba lagi
+    if parsed is None:
+        fixed = fix_json(raw_text)
+        parsed = try_parse(fixed)
+        if parsed is None:
+            for m in re.finditer(r"\{[\s\S]*\}", fixed):
+                parsed = try_parse(fix_json(m.group()))
+                if parsed:
+                    break
+
+    if parsed is None:
+        raise ValueError(
+            f"Tidak bisa mem-parse JSON dari response Claude.\n"
+            f"Raw (500 char pertama):\n{raw_text[:500]}"
+        )
+
+    return parsed, raw_text
 
 
 # ──────────────────────────────────────────────
