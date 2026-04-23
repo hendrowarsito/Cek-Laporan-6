@@ -72,10 +72,10 @@ CHECK_ITEMS_DEFAULT = [
 ]
 
 SEVERITY_CONFIG = {
-    "kritikal": {"emoji": "🔴", "color": "#e05c5c", "bg": "#3a1a1a"},
-    "minor":    {"emoji": "🟡", "color": "#f0a500", "bg": "#3a2e00"},
-    "ok":       {"emoji": "🟢", "color": "#2ecc8a", "bg": "#0a2e1e"},
-    "info":     {"emoji": "🔵", "color": "#58a6ff", "bg": "#0d1f3a"},
+    "kritikal": {"emoji": "🔴", "color": "#c0392b", "bg": "#fff0f0"},
+    "minor":    {"emoji": "🟡", "color": "#d4860a", "bg": "#fff8e6"},
+    "ok":       {"emoji": "🟢", "color": "#1a9e67", "bg": "#edfaf4"},
+    "info":     {"emoji": "🔵", "color": "#1e6fbf", "bg": "#eef4ff"},
 }
 
 SYSTEM_PROMPT = """Kamu adalah expert QA auditor laporan penilaian properti di Indonesia.
@@ -239,8 +239,8 @@ def render_finding_card(f: dict):
     hint   = f.get("page_hint", "")
     fid    = f.get("id", "")
 
-    prop_tag = f' &nbsp;·&nbsp; <span style="color:#58a6ff;">📌 {prop}</span>' if prop else ""
-    hint_tag = f'<span style="color:#7d8590;font-size:11px;float:right;">{hint}</span>' if hint else ""
+    prop_tag = f' &nbsp;·&nbsp; <span style="color:#1e6fbf;">📌 {prop}</span>' if prop else ""
+    hint_tag = f'<span style="color:#6b7280;font-size:11px;float:right;">{hint}</span>' if hint else ""
 
     st.markdown(f"""
 <div style="
@@ -263,12 +263,12 @@ def render_finding_card(f: dict):
             text-transform:uppercase;
             letter-spacing:.5px;
         ">{emoji} {sev}</span>
-        <span style="color:#7d8590;font-size:11px;font-family:monospace;">{cat}{prop_tag}</span>
-        <span style="color:#7d8590;font-size:11px;font-family:monospace;margin-left:auto;">{fid} &nbsp; {hint}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;">{cat}{prop_tag}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">{fid} &nbsp; {hint}</span>
     </div>
-    <div style="font-size:14px;font-weight:600;color:#e6edf3;margin-bottom:6px;">{title}</div>
-    <div style="font-size:12px;color:#b1bac4;font-family:monospace;background:#0d1117;
-                padding:8px 12px;border-radius:6px;line-height:1.6;">{detail}</div>
+    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{title}</div>
+    <div style="font-size:12px;color:#444;font-family:monospace;background:#ffffff;
+                padding:8px 12px;border-radius:6px;line-height:1.6;border:1px solid #e0e0e0;">{detail}</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -280,27 +280,27 @@ def render_summary_cards(s: dict):
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown(f"""
-<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;text-align:center;">
+<div style="background:#f8fafb;border:1px solid #dde3ea;border-radius:10px;padding:16px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
     <div style="font-size:32px;font-weight:800;color:{score_color};font-family:monospace;">{score}</div>
-    <div style="font-size:10px;color:#7d8590;text-transform:uppercase;letter-spacing:1px;">Skor QC</div>
+    <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:1px;">Skor QC</div>
 </div>""", unsafe_allow_html=True)
     with col2:
         st.markdown(f"""
-<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;text-align:center;">
-    <div style="font-size:32px;font-weight:800;color:#e05c5c;font-family:monospace;">{s.get('kritikal',0)}</div>
-    <div style="font-size:10px;color:#7d8590;text-transform:uppercase;letter-spacing:1px;">🔴 Kritikal</div>
+<div style="background:#fff0f0;border:1px solid #f5c6c6;border-radius:10px;padding:16px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+    <div style="font-size:32px;font-weight:800;color:#c0392b;font-family:monospace;">{s.get('kritikal',0)}</div>
+    <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:1px;">🔴 Kritikal</div>
 </div>""", unsafe_allow_html=True)
     with col3:
         st.markdown(f"""
-<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;text-align:center;">
-    <div style="font-size:32px;font-weight:800;color:#f0a500;font-family:monospace;">{s.get('minor',0)}</div>
-    <div style="font-size:10px;color:#7d8590;text-transform:uppercase;letter-spacing:1px;">🟡 Minor</div>
+<div style="background:#fff8e6;border:1px solid #f5e0a0;border-radius:10px;padding:16px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+    <div style="font-size:32px;font-weight:800;color:#d4860a;font-family:monospace;">{s.get('minor',0)}</div>
+    <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:1px;">🟡 Minor</div>
 </div>""", unsafe_allow_html=True)
     with col4:
         st.markdown(f"""
-<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;text-align:center;">
-    <div style="font-size:32px;font-weight:800;color:#2ecc8a;font-family:monospace;">{s.get('ok',0)}</div>
-    <div style="font-size:10px;color:#7d8590;text-transform:uppercase;letter-spacing:1px;">🟢 Sesuai</div>
+<div style="background:#edfaf4;border:1px solid #b2e8d0;border-radius:10px;padding:16px;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
+    <div style="font-size:32px;font-weight:800;color:#1a9e67;font-family:monospace;">{s.get('ok',0)}</div>
+    <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:1px;">🟢 Sesuai</div>
 </div>""", unsafe_allow_html=True)
 
 
@@ -321,53 +321,56 @@ def main():
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
     html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
-    .stApp { background: #0d1117; color: #e6edf3; }
-    section[data-testid="stSidebar"] { background: #161b22; border-right: 1px solid #30363d; }
-    section[data-testid="stSidebar"] * { color: #e6edf3 !important; }
+    .stApp { background: #f4f6f9; color: #1a1a2e; }
+    section[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #dde3ea; }
+    section[data-testid="stSidebar"] * { color: #1a1a2e !important; }
     .block-container { padding-top: 2rem; max-width: 1100px; }
-    div[data-testid="stFileUploader"] { border: 2px dashed #30363d; border-radius: 10px; padding: 10px; }
+    div[data-testid="stFileUploader"] { border: 2px dashed #c9d2dc; border-radius: 10px; padding: 10px; background: #fff; }
     .stButton > button {
-        background: #2ecc8a; color: #000; font-weight: 800;
+        background: #1a9e67; color: #fff; font-weight: 800;
         border: none; border-radius: 8px; padding: 10px 24px;
         font-family: 'Sora', sans-serif; transition: all .2s;
     }
-    .stButton > button:hover { background: #1a9e67; transform: translateY(-1px); }
-    .stButton > button:disabled { background: #1e2630; color: #7d8590; }
+    .stButton > button:hover { background: #147a50; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26,158,103,0.3); }
+    .stButton > button:disabled { background: #e5e7eb; color: #9ca3af; }
     .stTextInput input, .stTextInput input:focus {
-        background: #0d1117; color: #e6edf3;
-        border: 1px solid #30363d; border-radius: 6px;
+        background: #ffffff; color: #1a1a2e;
+        border: 1px solid #dde3ea; border-radius: 6px;
         font-family: 'DM Mono', monospace; font-size: 13px;
     }
-    .stTextInput input:focus { border-color: #2ecc8a !important; box-shadow: none !important; }
-    .stSelectbox > div > div { background: #161b22; color: #e6edf3; border-color: #30363d; }
-    .stCheckbox label { font-size: 13px; color: #b1bac4 !important; }
-    hr { border-color: #30363d; }
-    h1, h2, h3 { color: #e6edf3 !important; font-family: 'Sora', sans-serif !important; }
-    .stTabs [data-baseweb="tab-list"] { background: #161b22; border-bottom: 1px solid #30363d; }
-    .stTabs [data-baseweb="tab"] { color: #7d8590; font-size: 13px; font-weight: 600; }
-    .stTabs [aria-selected="true"] { color: #2ecc8a !important; border-bottom-color: #2ecc8a !important; }
+    .stTextInput input:focus { border-color: #1a9e67 !important; box-shadow: 0 0 0 2px rgba(26,158,103,0.15) !important; }
+    .stSelectbox > div > div { background: #ffffff; color: #1a1a2e; border-color: #dde3ea; }
+    .stCheckbox label { font-size: 13px; color: #374151 !important; }
+    hr { border-color: #dde3ea; }
+    h1, h2, h3 { color: #1a1a2e !important; font-family: 'Sora', sans-serif !important; }
+    .stTabs [data-baseweb="tab-list"] { background: #ffffff; border-bottom: 2px solid #e5e7eb; border-radius: 8px 8px 0 0; }
+    .stTabs [data-baseweb="tab"] { color: #6b7280; font-size: 13px; font-weight: 600; }
+    .stTabs [aria-selected="true"] { color: #1a9e67 !important; border-bottom-color: #1a9e67 !important; }
     .stTabs [data-baseweb="tab-panel"] { background: transparent; }
-    div[data-testid="stExpander"] { background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+    div[data-testid="stExpander"] { background: #ffffff; border: 1px solid #dde3ea; border-radius: 8px; }
     .stAlert { border-radius: 8px; }
+    [data-testid="stRadio"] label { color: #374151 !important; }
+    [data-testid="stCaption"] { color: #6b7280 !important; }
+    .stMarkdown p { color: #374151; }
 </style>
 """, unsafe_allow_html=True)
 
     # ── HEADER ──
     st.markdown("""
 <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
-    <div style="background:#2ecc8a;border-radius:10px;width:40px;height:40px;
+    <div style="background:#1a9e67;border-radius:10px;width:40px;height:40px;
                 display:flex;align-items:center;justify-content:center;font-size:20px;">📋</div>
     <div>
-        <h1 style="margin:0;font-size:24px;font-weight:800;letter-spacing:-0.5px;">
-            Cek<span style="color:#2ecc8a;">Laporan</span>
-            <span style="font-size:12px;background:#0a2e1e;color:#2ecc8a;border:1px solid #2ecc8a;
+        <h1 style="margin:0;font-size:24px;font-weight:800;letter-spacing:-0.5px;color:#1a1a2e;">
+            Cek<span style="color:#1a9e67;">Laporan</span>
+            <span style="font-size:12px;background:#edfaf4;color:#1a9e67;border:1px solid #1a9e67;
                          padding:2px 10px;border-radius:20px;font-weight:600;margin-left:8px;">v6.0 — AI Powered</span>
         </h1>
-        <p style="margin:0;color:#7d8590;font-size:12px;font-family:'DM Mono',monospace;">
+        <p style="margin:0;color:#6b7280;font-size:12px;font-family:'DM Mono',monospace;">
             KJPP Suwendho Rinaldy dan Rekan · Pengecekan Laporan Penilaian</p>
     </div>
 </div>
-<hr>
+<hr style="border-color:#dde3ea;">
 """, unsafe_allow_html=True)
 
     # ── LOAD DATA ──
@@ -459,7 +462,7 @@ def main():
             for f in all_files:
                 icon = "📄" if f.name.endswith(".pdf") else "📝"
                 st.markdown(
-                    f'<span style="font-family:monospace;font-size:12px;color:#b1bac4;">'
+                    f'<span style="font-family:monospace;font-size:12px;color:#6b7280;">'
                     f'{icon} {f.name} &nbsp;·&nbsp; {f.size//1024} KB</span>',
                     unsafe_allow_html=True
                 )
@@ -554,21 +557,21 @@ def main():
             exec_sum = result.get("summary", {}).get("executive_summary", "")
             if exec_sum:
                 st.markdown(f"""
-<div style="background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin-bottom:16px;">
-    <div style="font-size:10px;color:#7d8590;font-family:monospace;text-transform:uppercase;
+<div style="background:#ffffff;border:1px solid #dde3ea;border-radius:10px;padding:16px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,0.05);">
+    <div style="font-size:10px;color:#6b7280;font-family:monospace;text-transform:uppercase;
                 letter-spacing:1.5px;margin-bottom:8px;">RINGKASAN EKSEKUTIF</div>
-    <p style="font-size:14px;line-height:1.8;color:#b1bac4;margin:0;">{exec_sum}</p>
+    <p style="font-size:14px;line-height:1.8;color:#374151;margin:0;">{exec_sum}</p>
 </div>""", unsafe_allow_html=True)
 
             # Multi-objek: tampilkan daftar properti
             properties = result.get("properties", [])
             if len(properties) > 1:
                 st.markdown(f"""
-<div style="background:#0d1f3a;border:1px solid #58a6ff40;border-radius:10px;padding:14px;margin-bottom:16px;">
-    <div style="font-size:10px;color:#58a6ff;font-family:monospace;text-transform:uppercase;
+<div style="background:#eef4ff;border:1px solid #bfcfee;border-radius:10px;padding:14px;margin-bottom:16px;">
+    <div style="font-size:10px;color:#1e6fbf;font-family:monospace;text-transform:uppercase;
                 letter-spacing:1.5px;margin-bottom:8px;">🏢 OBJEK PROPERTI TERDETEKSI ({len(properties)})</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;">
-        {"".join(f'<span style="background:#0d1117;color:#58a6ff;border:1px solid #58a6ff;font-size:11px;font-family:monospace;padding:3px 10px;border-radius:12px;">{p}</span>' for p in properties)}
+        {"".join(f'<span style="background:#fff;color:#1e6fbf;border:1px solid #bfcfee;font-size:11px;font-family:monospace;padding:3px 10px;border-radius:12px;">{p}</span>' for p in properties)}
     </div>
 </div>""", unsafe_allow_html=True)
 
@@ -597,10 +600,10 @@ def main():
                         continue
                     cfg = SEVERITY_CONFIG[sev]
                     st.markdown(
-                        f'<div style="font-size:11px;font-family:monospace;color:#7d8590;'
+                        f'<div style="font-size:11px;font-family:monospace;color:#6b7280;'
                         f'text-transform:uppercase;letter-spacing:1.5px;margin:16px 0 8px;">'
                         f'{cfg["emoji"]} {sev.upper()} ({len(group)})'
-                        f'<span style="display:inline-block;height:1px;background:#30363d;'
+                        f'<span style="display:inline-block;height:1px;background:#dde3ea;'
                         f'width:200px;margin-left:10px;vertical-align:middle;"></span></div>',
                         unsafe_allow_html=True
                     )
@@ -765,8 +768,8 @@ def main():
 
     # ── FOOTER ──
     st.markdown("""
-<hr style="margin-top:40px;">
-<p style="text-align:center;font-size:12px;color:#7d8590;font-family:'DM Mono',monospace;">
+<hr style="margin-top:40px;border-color:#dde3ea;">
+<p style="text-align:center;font-size:12px;color:#9ca3af;font-family:'DM Mono',monospace;">
     CekLaporan v6.0 &nbsp;·&nbsp; KJPP SRR &nbsp;·&nbsp;
     Powered by Claude AI (claude-sonnet-4-5) &nbsp;·&nbsp; Created by HW
 </p>
