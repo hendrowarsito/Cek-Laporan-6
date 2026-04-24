@@ -705,6 +705,344 @@ def pages_to_text(pages: list, max_chars: int = MAX_CHARS) -> str:
 # HELPER: CLAUDE API
 # ══════════════════════════════════════════════
 
+
+# ══════════════════════════════════════════════
+# ENGINE: PENGECEKAN MATEMATIKA RESUME PENILAIAN
+# ══════════════════════════════════════════════
+
+def parse_id_number(s):
+    """Parse angka format Indonesia ke float."""
+    if not s:
+        return None
+    s = str(s).strip()
+    s = re.sub(r'^(Rp\.?\s*|US\$\s*|USD\s*)', '', s, flags=re.IGNORECASE).strip()
+    s = s.rstrip('.,').strip()
+    if re.match(r'^[\d\.]+,\d{1,2}$', s):
+        s = s.replace('.', '').replace(',', '.')
+    else:
+        s = s.replace('.', '').replace(',', '')
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def cek_matematika_resume(doc_text):
+    """
+    Pengecekan matematika otomatis pada Resume Penilaian.
+    Cek: penjumlahan komponen Rp/USD, konversi kurs, konsistensi
+    nilai kesimpulan, dan formula BPB × (1-penyusutan%) = nilai pasar.
+    """
+    TOLERANSI_BULAT = 0.005
+    TOLERANSI_KURS  = 0.01
+    findings  = []
+    extracted = {}
+
+    # ── Ekstrak kurs BI ───────────────────────────────────────────────────────
+    kurs_bi = None
+    kurs_pats = [
+        r'(?:US\$\s*1\s*=\s*Rp|1\s*US\$\s*=\s*Rp)\s*([\d\.]+(?:,\d+)?)',
+        r'(?:kurs|nilai tukar)[^\n]*(?:US\$|USD)[^\n]*Rp\s*([\d\.]+(?:,\d+)?)',
+    ]
+    for pat in kurs_pats:
+        km = re.search(pat, doc_text, re.IGNORECASE)
+        if km:
+            v = parse_id_number(km.group(1))
+            if v and v > 10000:
+                kurs_bi = v
+                extracted["kurs_bi"] = v
+                break
+
+    # ── Ekstrak komponen resume ───────────────────────────────────────────────
+    # Pattern utama: "A.  Nama   ...5+spasi...  angka_rp  angka_usd"
+    # Format SRR: titik sebagai ribuan (393.408.400), blank lines antar baris
+    comp_pat = re.compile(
+        r"[ \t]*([A-F])\.[ \t]+(.+?)[ \t]{5,}"
+        r"([\d]{1,3}(?:\.[\d]{3})+)[ \t]+"
+        r"([\d]{1,3}(?:\.[\d]{3})+)",
+        re.MULTILINE
+    )
+    components = {}
+    search_zone = doc_text[:60000]
+    for m in comp_pat.finditer(search_zone):
+        rp_v  = parse_id_number(m.group(3))
+        usd_v = parse_id_number(m.group(4))
+        if rp_v and rp_v > 0 and m.group(1) not in components:
+            components[m.group(1)] = {
+                "nama":    m.group(2).strip()[:60],
+                "rp":      rp_v,
+                "usd":     usd_v,
+                "rp_raw":  m.group(3),
+                "usd_raw": m.group(4),
+            }
+    # Fallback: format koma/titik campuran (docx/Word)
+    if not components:
+        comp_pat2 = re.compile(
+            r"[ \t]*([A-F])\.[ \t]+(.+?)[ \t]{3,}"
+            r"([\d]{1,3}(?:[.,][\d]{3})*(?:[.,][\d]{1,2})?)[ \t]+"
+            r"([\d]{1,3}(?:[.,][\d]{3})*(?:[.,][\d]{1,2})?)",
+            re.MULTILINE
+        )
+        for m in comp_pat2.finditer(search_zone):
+            rp_v  = parse_id_number(m.group(3))
+            usd_v = parse_id_number(m.group(4))
+            if rp_v and rp_v > 0 and m.group(1) not in components:
+                components[m.group(1)] = {
+                    "nama": m.group(2).strip()[:60],
+                    "rp":   rp_v, "usd": usd_v,
+                    "rp_raw": m.group(3), "usd_raw": m.group(4),
+                }
+    extracted["components"] = components
+
+    # ── Ekstrak total ─────────────────────────────────────────────────────────
+    total_rp = total_usd = None
+    # Deteksi apakah resume dalam satuan ribuan
+    resume_ribuan = bool(re.search(
+        r'Rp\s*\.?000|Rp\s+[Rr]ibu|\(Rp\s*,000|\(Rp\s+000',
+        doc_text[:60000], re.IGNORECASE
+    ))
+    extracted["resume_ribuan"] = resume_ribuan
+
+    tot_pats = [
+        r'Total\s+[A-F\-]+\s+([\d]{1,3}(?:\.[\d]{3})+)[ \t]+([\d]{1,3}(?:\.[\d]{3})+)',
+        r'(?:Total|TOTAL)\s+([\d]{1,3}(?:[.,][\d]{3})*(?:[.,][\d]{1,2})?)\s+([\d]{1,3}(?:[.,][\d]{3})*(?:[.,][\d]{1,2})?)',
+    ]
+    for pat in tot_pats:
+        tm = re.search(pat, doc_text[:60000], re.IGNORECASE)
+        if tm:
+            tv = parse_id_number(tm.group(1))
+            if tv and tv > 0:
+                total_rp  = tv
+                total_usd = parse_id_number(tm.group(2)) if tm.lastindex >= 2 else None
+                extracted["total_rp"]  = total_rp
+                extracted["total_usd"] = total_usd
+                break
+
+    # ── Ekstrak nilai kesimpulan ──────────────────────────────────────────────
+    conclusion_rp = conclusion_usd = None
+    conc_pat = re.compile(
+        r'(?:nilai pasar|NILAI PASAR|kesimpulan|KESIMPULAN)[^\n]{0,120}'
+        r'Rp\s*([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
+        re.IGNORECASE | re.DOTALL
+    )
+    cm = conc_pat.search(doc_text)
+    if cm:
+        conclusion_rp = parse_id_number(cm.group(1))
+        usd_near = doc_text[cm.start():cm.start() + 500]
+        um = re.search(r'US\$\s*([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)', usd_near, re.IGNORECASE)
+        if um:
+            conclusion_usd = parse_id_number(um.group(1))
+    if conclusion_rp:
+        extracted["conclusion_rp"]  = conclusion_rp
+        extracted["conclusion_usd"] = conclusion_usd
+
+    # ── Ekstrak tabel BPB + penyusutan ────────────────────────────────────────
+    bpb_items = []
+    bpb_pat = re.compile(
+        r'(?:Tanah|Bangunan|Sarana|Mesin|Kendaraan)[^\n]{0,80}'
+        r'([\d]{1,3}(?:[.,]\d{3})*)\s+'
+        r'([\d,\.]+)%\s*'
+        r'([\d]{1,3}(?:[.,]\d{3})*)',
+        re.IGNORECASE
+    )
+    for m in bpb_pat.finditer(doc_text):
+        bpb_v  = parse_id_number(m.group(1))
+        depr_s = m.group(2).replace(',', '.')
+        mkt_v  = parse_id_number(m.group(3))
+        try:
+            depr_pct = float(depr_s) / 100
+        except ValueError:
+            continue
+        if bpb_v and mkt_v and bpb_v > 0:
+            bpb_items.append({
+                "bpb": bpb_v, "depr_pct": depr_pct, "mkt_val": mkt_v,
+                "expected": bpb_v * (1 - depr_pct),
+                "context": doc_text[max(0, m.start()-40):m.start()+60].strip()
+            })
+    extracted["bpb_items"] = bpb_items
+
+    # ══ CEK 1: Penjumlahan Rp ════════════════════════════════════════════════
+    if components and total_rp:
+        sum_rp  = sum(c["rp"] for c in components.values())
+        diff    = abs(sum_rp - total_rp)
+        tol     = total_rp * TOLERANSI_BULAT
+        last_k  = list(components.keys())[-1]
+        ok = diff <= tol
+        findings.append({
+            "id": "M001",
+            "severity": "ok" if ok else "kritikal",
+            "category": "Formula Resume",
+            "title": ("Penjumlahan komponen Rp sesuai total" if ok
+                      else "Penjumlahan komponen Rp TIDAK sesuai total"),
+            "detail": (
+                "Jumlah komponen A-" + last_k + ": Rp " + f"{sum_rp:,.0f}" + "\n"
+                "Total tercantum: Rp " + f"{total_rp:,.0f}" + "\n"
+                + ("Selisih: Rp " + f"{diff:,.0f}" + " (dalam toleransi pembulatan)" if ok
+                   else "SELISIH: Rp " + f"{diff:,.0f}" + " — perlu diperiksa")
+            ),
+            "page_hint": "Resume Penilaian",
+            "formula": "Sigma komponen Rp = " + f"{sum_rp:,.0f}",
+        })
+
+    # ══ CEK 2: Penjumlahan USD ════════════════════════════════════════════════
+    usd_comps = {k: v for k, v in components.items() if v.get("usd")}
+    if usd_comps and total_usd:
+        sum_usd = sum(c["usd"] for c in usd_comps.values())
+        diff    = abs(sum_usd - total_usd)
+        tol     = total_usd * TOLERANSI_BULAT
+        ok = diff <= tol
+        findings.append({
+            "id": "M002",
+            "severity": "ok" if ok else "kritikal",
+            "category": "Formula Resume",
+            "title": ("Penjumlahan komponen USD sesuai total" if ok
+                      else "Penjumlahan komponen USD TIDAK sesuai total"),
+            "detail": (
+                "Jumlah USD komponen: " + f"{sum_usd:,.0f}" + "\n"
+                "Total USD tercantum: " + f"{total_usd:,.0f}" + "\n"
+                + ("Selisih: " + f"{diff:,.0f}" if ok
+                   else "SELISIH: " + f"{diff:,.0f}" + " — perlu diperiksa")
+            ),
+            "page_hint": "Resume Penilaian",
+            "formula": "Sigma komponen USD = " + f"{sum_usd:,.0f}",
+        })
+
+    # ══ CEK 3: Konversi kurs per komponen ════════════════════════════════════
+    if kurs_bi and usd_comps:
+        errors = []
+        rp_mult = 1000 if extracted.get("resume_ribuan") else 1
+        for kode, comp in usd_comps.items():
+            exp_usd  = (comp["rp"] * rp_mult) / kurs_bi
+            act_usd  = comp["usd"]
+            diff_pct = abs(exp_usd - act_usd) / exp_usd if exp_usd else 0
+            if diff_pct > TOLERANSI_KURS:
+                errors.append(
+                    kode + ". " + comp["nama"][:30] + ": "
+                    "Rp " + f"{comp['rp']:,.0f}" + " / " + f"{kurs_bi:,.0f}" +
+                    " = USD " + f"{round(exp_usd):,.0f}" +
+                    " (tercantum: " + f"{act_usd:,.0f}" + ", selisih: " +
+                    f"{abs(act_usd - round(exp_usd)):,.0f}" + ")"
+                )
+        ok = len(errors) == 0
+        findings.append({
+            "id": "M003",
+            "severity": "ok" if ok else "kritikal",
+            "category": "Konversi Kurs",
+            "title": ("Konversi kurs per komponen sesuai" if ok
+                      else "Konversi kurs SALAH pada " + str(len(errors)) + " komponen"),
+            "detail": (
+                "Semua " + str(len(usd_comps)) + " komponen: Rp / " +
+                f"{kurs_bi:,.0f}" + " = USD (dalam toleransi)" if ok
+                else "Kurs BI: 1 USD = Rp " + f"{kurs_bi:,.0f}" + "\n" + "\n".join(errors)
+            ),
+            "page_hint": "Resume Penilaian",
+            "formula": "Nilai Rp / " + f"{kurs_bi:,.0f}" + " = Nilai USD",
+        })
+
+    # ══ CEK 4: Konversi kurs total ════════════════════════════════════════════
+    if kurs_bi and total_rp and total_usd:
+        rp_mult = 1000 if extracted.get("resume_ribuan") else 1
+        exp_total_usd = (total_rp * rp_mult) / kurs_bi
+        diff_pct = abs(exp_total_usd - total_usd) / exp_total_usd if exp_total_usd else 1
+        ok = diff_pct <= TOLERANSI_KURS
+        exp_r = round(exp_total_usd)
+        findings.append({
+            "id": "M004",
+            "severity": "ok" if ok else "kritikal",
+            "category": "Konversi Kurs",
+            "title": ("Konversi kurs total Rp ke USD sesuai" if ok
+                      else "Konversi kurs TOTAL Rp ke USD tidak sesuai"),
+            "detail": (
+                "Total Rp: " + f"{total_rp:,.0f}" + "\n"
+                "Kurs BI: " + f"{kurs_bi:,.0f}" + "\n"
+                "USD seharusnya: " + f"{exp_r:,.0f}" + "\n"
+                "USD tercantum:  " + f"{total_usd:,.0f}" + "\n"
+                + ("OK" if ok else "SELISIH: " + f"{abs(total_usd - exp_r):,.0f}" +
+                   " (" + f"{diff_pct*100:.2f}" + "%)")
+            ),
+            "page_hint": "Resume / Kesimpulan",
+            "formula": f"{total_rp:,.0f}" + " / " + f"{kurs_bi:,.0f}" +
+                       " = " + f"{exp_r:,.0f}",
+        })
+
+    # ══ CEK 5: Konsistensi nilai kesimpulan vs total resume ═══════════════════
+    if total_rp and conclusion_rp:
+        # Resume biasanya satuan ribuan (Rp .000,00), kesimpulan angka penuh
+        norm_total = total_rp * 1000
+        diff_pct = abs(norm_total - conclusion_rp) / conclusion_rp if conclusion_rp else 1
+        ok = diff_pct <= TOLERANSI_BULAT
+        findings.append({
+            "id": "M005",
+            "severity": "ok" if ok else "kritikal",
+            "category": "Konsistensi Nilai",
+            "title": ("Nilai kesimpulan konsisten dengan resume" if ok
+                      else "Nilai kesimpulan TIDAK konsisten dengan resume"),
+            "detail": (
+                "Total resume (ribuan): Rp " + f"{total_rp:,.0f}" + "\n"
+                "Setara penuh:          Rp " + f"{norm_total:,.0f}" + "\n"
+                "Nilai kesimpulan:      Rp " + f"{conclusion_rp:,.0f}" + "\n"
+                + ("Konsisten" if ok
+                   else "SELISIH: Rp " + f"{abs(norm_total - conclusion_rp):,.0f}")
+            ),
+            "page_hint": "Surat Pengantar / Kesimpulan",
+            "formula": "Resume x 1.000 = Nilai Kesimpulan",
+        })
+
+    # ══ CEK 6: BPB × (1 - penyusutan%) = nilai pasar ════════════════════════
+    if bpb_items:
+        errors = []
+        for item in bpb_items[:20]:
+            diff_pct = (abs(item["expected"] - item["mkt_val"]) / item["expected"]
+                        if item["expected"] > 0 else 0)
+            if diff_pct > TOLERANSI_BULAT and abs(item["expected"] - item["mkt_val"]) > 1000:
+                errors.append(
+                    "BPB " + f"{item['bpb']:,.0f}" +
+                    " x (1-" + f"{item['depr_pct']*100:.1f}" + "%) = " +
+                    f"{round(item['expected']):,.0f}" +
+                    " (tercantum: " + f"{item['mkt_val']:,.0f}" + ", selisih: " +
+                    f"{abs(item['mkt_val'] - round(item['expected'])):,.0f}" + ")"
+                )
+        ok = len(errors) == 0
+        findings.append({
+            "id": "M006",
+            "severity": "ok" if ok else "minor",
+            "category": "Formula BPB",
+            "title": ("Formula BPB x (1-penyusutan) sesuai — " +
+                      str(len(bpb_items)) + " baris" if ok
+                      else "Formula BPB perlu verifikasi — " + str(len(errors)) + " baris"),
+            "detail": (
+                "Semua " + str(len(bpb_items)) + " baris BPB memenuhi formula" if ok
+                else "Potensi ketidaksesuaian:\n" + "\n".join(errors[:5])
+            ),
+            "page_hint": "Bab D.1 / Tabel Ringkasan",
+            "formula": "BPB x (1 - Depresiasi%) = Nilai Pasar",
+        })
+
+    if not findings:
+        findings.append({
+            "id": "M000",
+            "severity": "info",
+            "category": "Formula Resume",
+            "title": "Data numerik tidak dapat diekstrak otomatis",
+            "detail": (
+                "Engine tidak menemukan tabel resume dengan format yang dapat diparse. "
+                "Kemungkinan: (1) tidak ada Resume Penilaian, (2) format tabel tidak standar, "
+                "atau (3) PDF ter-scan. Pengecekan dilakukan manual atau via Claude AI."
+            ),
+            "page_hint": "Resume Penilaian",
+            "formula": "-",
+        })
+
+    return {
+        "findings":   findings,
+        "extracted":  extracted,
+        "n_ok":       sum(1 for f in findings if f["severity"] == "ok"),
+        "n_kritikal": sum(1 for f in findings if f["severity"] == "kritikal"),
+        "n_minor":    sum(1 for f in findings if f["severity"] == "minor"),
+    }
+
+
+
 def recover_partial_json(raw_text: str):
     """
     Coba selamatkan JSON yang terpotong karena token limit.
@@ -1092,6 +1430,9 @@ def main():
                 doc_text = pages_to_text(all_pages)
                 status.update(label=f"✅ {len(all_pages)} halaman dibaca dari {len(all_files)} file", state="complete")
 
+            # ── CEK MATEMATIKA (berjalan sebelum Claude, instan) ──
+            math_result = cek_matematika_resume(doc_text)
+
             with st.status("🧠 Claude sedang menganalisis laporan...", expanded=True) as status:
                 st.write(f"Model: `{MODEL}` · Mode: **{mode_label}**")
                 st.write(f"Teks dikirim: **{len(doc_text):,} karakter**")
@@ -1184,6 +1525,137 @@ def main():
                         render_finding_card(f)
             else:
                 st.success("✅ Tidak ada temuan — laporan terlihat konsisten.")
+
+            # ── PANEL PENGECEKAN MATEMATIKA ──
+            _mk = MODE_CONFIG[mode_label]["key"]
+            if _mk in ("aset", "saham", "precheck", "deepaudit", "mappi", "multiobj", "fairness"):
+                st.markdown("---")
+                st.markdown("""
+<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+    <span style="font-size:18px;">🔢</span>
+    <span style="font-size:16px;font-weight:800;color:#1a1a2e;">Pengecekan Matematika Otomatis</span>
+    <span style="font-size:11px;background:#edfaf4;color:#1a9e67;border:1px solid #1a9e67;
+                 padding:2px 8px;border-radius:12px;font-family:monospace;">Exact Calculation</span>
+</div>""", unsafe_allow_html=True)
+
+                _ext = math_result.get("extracted", {})
+                _mf  = math_result.get("findings", [])
+
+                # Info strip: data yang berhasil diekstrak
+                kurs_str  = f"1 USD = Rp {_ext['kurs_bi']:,.0f}" if _ext.get("kurs_bi") else "tidak terdeteksi"
+                n_comp    = len(_ext.get("components", {}))
+                total_str = f"Rp {_ext['total_rp']:,.0f}" if _ext.get("total_rp") else "tidak terdeteksi"
+                st.markdown(f"""
+<div style="background:#f8fafb;border:1px solid #dde3ea;border-radius:8px;
+            padding:10px 14px;margin-bottom:14px;font-family:monospace;font-size:12px;
+            display:flex;gap:24px;flex-wrap:wrap;">
+    <span>🏷️ <b>Komponen</b>: {n_comp} item</span>
+    <span>💱 <b>Kurs BI</b>: {kurs_str}</span>
+    <span>📊 <b>Total Resume</b>: {total_str}</span>
+    <span>✅ <b>Sesuai</b>: {math_result["n_ok"]} &nbsp;
+          🔴 <b>Kritikal</b>: {math_result["n_kritikal"]} &nbsp;
+          🟡 <b>Minor</b>: {math_result["n_minor"]}</span>
+</div>""", unsafe_allow_html=True)
+
+                # Tabel komponen jika terdeteksi
+                if n_comp > 0:
+                    with st.expander(f"📋 Detail Komponen Resume ({n_comp} item terdeteksi)", expanded=True):
+                        rows_html = ""
+                        for kode, comp in _ext["components"].items():
+                            usd_str = f"{comp['usd']:,.0f}" if comp.get("usd") else "-"
+                            exp_usd = ""
+                            if _ext.get("kurs_bi") and comp.get("usd"):
+                                e = comp["rp"] / _ext["kurs_bi"]
+                                diff_pct = abs(e - comp["usd"]) / e if e > 0 else 0
+                                icon = "✅" if diff_pct <= 0.01 else "⚠️"
+                                exp_usd = f'<span style="color:#6b7280;font-size:10px;">{icon} exp: {round(e):,}</span>'
+                            rows_html += (
+                                f'<tr>'
+                                f'<td style="padding:6px 10px;font-weight:700;color:#1e6fbf;">{kode}</td>'
+                                f'<td style="padding:6px 10px;">{comp["nama"]}</td>'
+                                f'<td style="padding:6px 10px;text-align:right;font-family:monospace;">'
+                                f'Rp {comp["rp"]:,.0f}</td>'
+                                f'<td style="padding:6px 10px;text-align:right;font-family:monospace;">'
+                                f'USD {usd_str} {exp_usd}</td>'
+                                f'</tr>'
+                            )
+                        # Total row
+                        if _ext.get("total_rp"):
+                            tl_usd = f"{_ext['total_usd']:,.0f}" if _ext.get("total_usd") else "-"
+                            rows_html += (
+                                f'<tr style="background:#f0f9f4;font-weight:800;border-top:2px solid #1a9e67;">'
+                                f'<td style="padding:8px 10px;" colspan="2">TOTAL</td>'
+                                f'<td style="padding:8px 10px;text-align:right;font-family:monospace;color:#1a9e67;">'
+                                f'Rp {_ext["total_rp"]:,.0f}</td>'
+                                f'<td style="padding:8px 10px;text-align:right;font-family:monospace;color:#1a9e67;">'
+                                f'USD {tl_usd}</td>'
+                                f'</tr>'
+                            )
+                        st.markdown(f"""
+<table style="width:100%;border-collapse:collapse;font-size:13px;
+              background:#fff;border:1px solid #dde3ea;border-radius:8px;overflow:hidden;">
+    <thead>
+        <tr style="background:#f8fafb;border-bottom:2px solid #dde3ea;">
+            <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;
+                       text-transform:uppercase;letter-spacing:1px;width:40px;">Kode</th>
+            <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;
+                       text-transform:uppercase;letter-spacing:1px;">Uraian</th>
+            <th style="padding:8px 10px;text-align:right;font-size:11px;color:#6b7280;
+                       text-transform:uppercase;letter-spacing:1px;">Nilai Rp</th>
+            <th style="padding:8px 10px;text-align:right;font-size:11px;color:#6b7280;
+                       text-transform:uppercase;letter-spacing:1px;">Nilai USD</th>
+        </tr>
+    </thead>
+    <tbody>{rows_html}</tbody>
+</table>""", unsafe_allow_html=True)
+
+                # Findings matematika
+                if _mf:
+                    math_grouped = {}
+                    for mf in _mf:
+                        math_grouped.setdefault(mf["severity"], []).append(mf)
+                    for sev in ["kritikal", "minor", "ok", "info"]:
+                        grp = math_grouped.get(sev, [])
+                        if not grp:
+                            continue
+                        cfg = SEVERITY_CONFIG[sev]
+                        st.markdown(
+                            f'<div style="font-size:11px;font-family:monospace;color:#6b7280;'
+                            f'text-transform:uppercase;letter-spacing:1.5px;margin:12px 0 8px;">'
+                            f'{cfg["emoji"]} {sev.upper()} ({len(grp)})'
+                            f'<span style="display:inline-block;height:1px;background:#dde3ea;'
+                            f'width:160px;margin-left:10px;vertical-align:middle;"></span></div>',
+                            unsafe_allow_html=True
+                        )
+                        for mf in grp:
+                            formula_html = ""
+                            if mf.get("formula") and mf["formula"] != "-":
+                                formula_html = (
+                                    f'<div style="margin-top:6px;font-size:11px;'
+                                    f'background:#f0f4ff;border:1px solid #bfcfee;'
+                                    f'border-radius:4px;padding:5px 10px;color:#1e6fbf;'
+                                    f'font-family:monospace;">📐 {mf["formula"]}</div>'
+                                )
+                            sev_cfg = SEVERITY_CONFIG.get(mf["severity"], SEVERITY_CONFIG["info"])
+                            st.markdown(f"""
+<div style="background:{sev_cfg['bg']};border:1px solid {sev_cfg['color']}40;
+            border-left:4px solid {sev_cfg['color']};border-radius:8px;
+            padding:12px 16px;margin-bottom:8px;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="background:{sev_cfg['color']}22;color:{sev_cfg['color']};
+                     border:1px solid {sev_cfg['color']};font-size:10px;font-weight:700;
+                     padding:2px 8px;border-radius:4px;text-transform:uppercase;">
+            {sev_cfg['emoji']} {mf['severity']}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;">{mf.get('category','')}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">
+            {mf.get('id','')} &nbsp; {mf.get('page_hint','')}</span>
+    </div>
+    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{mf['title']}</div>
+    <div style="font-size:12px;color:#444;font-family:monospace;white-space:pre-line;
+                background:#ffffff;padding:8px 12px;border-radius:6px;
+                border:1px solid #e0e0e0;">{mf['detail']}</div>
+    {formula_html}
+</div>""", unsafe_allow_html=True)
 
             with st.expander("🔧 Raw JSON Output (untuk debugging)"):
                 st.code(raw_text, language="json")
