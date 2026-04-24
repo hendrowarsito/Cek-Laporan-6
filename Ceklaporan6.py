@@ -14,8 +14,8 @@ from google.oauth2.service_account import Credentials
 # KONSTANTA
 # ──────────────────────────────────────────────
 MODEL      = "claude-sonnet-4-5"
-MAX_TOKENS = 4096
-MAX_CHARS  = 60000
+MAX_TOKENS = 8192
+MAX_CHARS  = 40000
 
 # Nama sheet di Google Spreadsheet
 SHEET_RIWAYAT  = "riwayat_audit"
@@ -393,6 +393,74 @@ def pages_to_text(pages: list, max_chars: int = MAX_CHARS) -> str:
 # HELPER: CLAUDE API
 # ══════════════════════════════════════════════
 
+def recover_partial_json(raw_text: str):
+    """
+    Coba selamatkan JSON yang terpotong karena token limit.
+    Menggunakan 3 strategi bertingkat.
+    """
+    import re as _re
+    start = raw_text.find("{")
+    if start == -1:
+        return None
+    partial = raw_text[start:]
+
+    def close_json(text):
+        cleaned = _re.sub(r',\s*"[^"]*"\s*:?\s*$', "", text.rstrip())
+        cleaned = _re.sub(r',\s*"[^"]*"\s*$', "", cleaned.rstrip())
+        stack, in_string, esc = [], False, False
+        for ch in cleaned:
+            if esc: esc = False; continue
+            if ch == "\\" and in_string: esc = True; continue
+            if ch == '"': in_string = not in_string; continue
+            if in_string: continue
+            if ch in "{[": stack.append(ch)
+            elif ch in "}]":
+                if stack: stack.pop()
+        closing = "".join("]" if b == "[" else "}" for b in reversed(stack))
+        return cleaned + closing
+
+    # Strategi 1: close bracket
+    try:
+        parsed = json.loads(close_json(partial))
+        parsed.setdefault("summary", {})
+        parsed.setdefault("findings", [])
+        parsed.setdefault("properties", [])
+        parsed["_partial"] = True
+        return parsed
+    except Exception:
+        pass
+
+    # Strategi 2: buang findings, selamatkan summary
+    fm = _re.search(r'"findings"\s*:\s*\[', partial)
+    if fm:
+        before = partial[:fm.start()]
+        se = before.rfind("}")
+        if se > 0:
+            try:
+                parsed = json.loads(before[:se+1] + ', "findings": []}')
+                parsed["_partial"] = True
+                return parsed
+            except Exception:
+                pass
+
+    # Strategi 3: ekstrak field by field
+    result = {"_partial": True, "findings": [], "properties": [], "summary": {}}
+    m = _re.search(r'"report_type"\s*:\s*"([^"]*)"', partial)
+    if m: result["report_type"] = m.group(1)
+    pm = _re.search(r'"properties"\s*:\s*\[(.*?)\]', partial, _re.DOTALL)
+    if pm: result["properties"] = _re.findall(r'"([^"]+)"', pm.group(1))
+    for field in ["total_findings", "kritikal", "minor", "ok", "info", "overall_score"]:
+        nm = _re.search('"'  + field + '"\\s*:\\s*(\\d+)', partial)
+        if nm: result["summary"][field] = int(nm.group(1))
+    em = _re.search(r'"executive_summary"\s*:\s*"([^"]*)"', partial)
+    if em: result["summary"]["executive_summary"] = em.group(1)
+    for fr in _re.findall(r'\{\s*"id"\s*:.*?"property"\s*:\s*"[^"]*"\s*\}', partial, _re.DOTALL):
+        try: result["findings"].append(json.loads(fr))
+        except Exception: pass
+    if result.get("report_type") or result["summary"]:
+        return result
+    return None
+
 def call_claude(api_key: str, mode_instruction: str, check_items: list, doc_text: str):
     client = anthropic.Anthropic(api_key=api_key)
     user_message = (
@@ -437,6 +505,10 @@ def call_claude(api_key: str, mode_instruction: str, check_items: list, doc_text
                 parsed = try_parse(fix_json(m.group()))
                 if parsed:
                     break
+    # Lapis 5: recovery partial JSON (response terpotong karena token limit)
+    if parsed is None:
+        parsed = recover_partial_json(raw_text)
+
     if parsed is None:
         raise ValueError(
             f"Tidak bisa mem-parse JSON dari response Claude.\n"
@@ -722,6 +794,14 @@ def main():
             st.markdown("---")
             st.markdown(f"### 📊 Hasil Audit — `{result.get('report_type','').upper()}`")
             st.caption(f"{' · '.join(file_info)} · {datetime.now().strftime('%d %b %Y, %H:%M')} · Mode: {mode_label}")
+
+            # Peringatan jika response terpotong
+            if result.get("_partial"):
+                st.warning(
+                    "⚠️ **Response Claude terpotong** karena laporan terlalu panjang. "
+                    "Temuan yang berhasil dibaca tetap ditampilkan, namun mungkin tidak lengkap. "
+                    "Coba gunakan mode **Pre-Check** untuk laporan besar, atau kurangi jumlah halaman."
+                )
 
             render_summary_cards(result.get("summary", {}))
             st.markdown("<br>", unsafe_allow_html=True)
