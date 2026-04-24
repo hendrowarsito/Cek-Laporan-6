@@ -64,9 +64,145 @@ MODE_CONFIG = {
             "LANGKAH 3: Tandai temuan dengan nama objek yang relevan."
         ),
     },
+    "📈 Penilaian Saham": {
+        "key": "saham",
+        "desc": "Khusus laporan penilaian saham (Business Valuation) sesuai POJK 35/2020.",
+        "instruction": (
+            "Ini adalah laporan PENILAIAN SAHAM (Business Valuation). Lakukan audit komprehensif "
+            "dengan fokus pada hal-hal berikut secara berurutan:\n\n"
+
+            "=== BLOK 1: KONSISTENSI IDENTITAS LAPORAN ===\n"
+            "1. Konsistensi nama obyek penilaian: Pastikan nama perusahaan yang dinilai "
+            "(misalnya 'PT Chandra Capital Indonesia' atau 'CCI') dan persentase saham "
+            "(misalnya '99,99%') KONSISTEN di seluruh bagian laporan — cover, surat pengantar, "
+            "ringkasan eksekutif, deskripsi penugasan, kesimpulan. "
+            "KHUSUS: Cek apakah ada bagian yang menyebut nama perusahaan/saham LAIN yang tidak "
+            "relevan (misalnya nama perusahaan dari laporan lain seperti 'MDK', 'MDR', 'TPIA', "
+            "atau kode ticker lain) karena ini adalah kesalahan copy-paste yang sangat umum.\n"
+
+            "2. Konsistensi nama Pemberi Tugas dan Pengguna Laporan: "
+            "Nama, alamat, bidang usaha, nomor telepon, email, dan website harus sama persis "
+            "di semua bagian (surat pengantar vs ringkasan eksekutif vs deskripsi penugasan).\n"
+
+            "3. Konsistensi nomor laporan dan tanggal: "
+            "Nomor laporan (misal: 00181/2.0059-02/BS/04/0242/1/IV/2026), tanggal penerbitan "
+            "(16 April 2026), dan tanggal penilaian (31 Desember 2025) harus sama di semua bagian.\n"
+
+            "=== BLOK 2: KONSISTENSI NILAI ===\n"
+            "4. Nilai kesimpulan: Nilai akhir penilaian (dalam USD dan setara Rupiah) harus "
+            "SAMA PERSIS di: surat pengantar, ringkasan eksekutif (Bab 1), dan kesimpulan (Bab 7). "
+            "Cek juga konversi kurs: nilai USD x kurs BI harus sama dengan nilai Rupiah yang disebut.\n"
+
+            "5. Konsistensi angka keuangan: Angka-angka di laporan posisi keuangan (Tabel 3.2), "
+            "laporan laba rugi (Tabel 3.3), dan tabel penilaian (Tabel 1.1 / Tabel 7.1) harus "
+            "konsisten satu sama lain. Khusus cek: Total Aset = Total Liabilitas + Ekuitas.\n"
+
+            "6. Aset non-operasional vs operasional: Pastikan pemisahan aset operasional dan "
+            "non-operasional konsisten antara narasi dan tabel. "
+            "Cek angka: Nilai 100% ekuitas = Indikasi nilai operasional + Aset non-operasional.\n"
+
+            "7. Diskon likuiditas pasar: Jika diskon tidak diterapkan, pastikan alasannya "
+            "konsisten antara narasi Bab 1, Bab 7, dan tabel (nilai negatif sebelum diskon = "
+            "alasan tidak diterapkan).\n"
+
+            "=== BLOK 3: KONSISTENSI METODE & PENDEKATAN ===\n"
+            "8. Nama pendekatan & metode: Pastikan konsisten di cover letter, Bab 1 (bagian 1.7), "
+            "Bab 6, dan Bab 7. "
+            "KHUSUS: Cek apakah ada bagian yang menyebut pendekatan/metode untuk perusahaan LAIN "
+            "(misal 'pendekatan pasar untuk perusahaan tambang nikel') yang tidak relevan dengan "
+            "obyek penilaian saat ini — ini adalah kesalahan copy-paste yang sangat umum.\n"
+
+            "9. Alasan pemilihan metode: Alasan tidak menggunakan metode lain (DCF, market approach) "
+            "harus mengacu pada obyek yang benar dan konsisten dengan karakteristik perusahaan.\n"
+
+            "=== BLOK 4: KESESUAIAN STANDAR POJK 35/2020 & KEPI/SPI ===\n"
+            "10. Elemen wajib POJK 35/2020: Cek keberadaan: (a) status penilai dan STTD OJK, "
+            "(b) tujuan dan maksud penilaian, (c) tanggal efektif penilaian, (d) dasar nilai, "
+            "(e) premis penilaian, (f) kondisi pembatas, (g) asumsi dan asumsi khusus, "
+            "(h) pernyataan independensi penilai, (i) pernyataan penilai, "
+            "(j) kejadian setelah tanggal penilaian.\n"
+
+            "11. Konsistensi premis penilaian: Pastikan premis 'going concern' atau 'likuidasi' "
+            "konsisten antara pernyataan dan metode yang dipilih.\n"
+
+            "=== BLOK 5: TYPO & INKONSISTENSI PENULISAN ===\n"
+            "12. Typo nama perusahaan: Cek ejaan nama perusahaan (PT Chandra Capital Indonesia, "
+            "PT Chandra Asri Pacific, PT Chandra Asri Perkasa, dll) konsisten di seluruh dokumen.\n"
+
+            "13. Konsistensi akronim/singkatan: Setiap akronim yang didefinisikan di Daftar Istilah "
+            "harus digunakan secara konsisten. Cek apakah ada bagian yang masih menggunakan nama "
+            "lengkap setelah akronim didefinisikan, atau sebaliknya menggunakan akronim sebelum "
+            "didefinisikan.\n"
+
+            "14. Konsistensi kalimat yang berulang: Laporan penilaian sering memiliki paragraf "
+            "yang diulang di beberapa bab (misalnya latar belakang, deskripsi penugasan). "
+            "Pastikan semua paragraf berulang itu IDENTIK dan tidak ada perbedaan kecil yang "
+            "menyesatkan.\n"
+
+            "15. Format angka: Pastikan format penulisan angka konsisten "
+            "(misalnya US$ 659 ribu vs USD 659.000 vs Rp 11.067 juta — pilih satu format).\n"
+
+            "Berikan temuan yang SPESIFIK dengan menyebutkan halaman/bab/bagian yang bermasalah "
+            "dan nilai/kata yang tidak konsisten."
+        ),
+    },
+    "⚖️ Pendapat Kewajaran": {
+        "key": "fairness",
+        "desc": "Khusus laporan pendapat kewajaran (Fairness Opinion) atas transaksi.",
+        "instruction": (
+            "Ini adalah laporan PENDAPAT KEWAJARAN (Fairness Opinion). Lakukan audit komprehensif "
+            "dengan fokus pada hal-hal berikut:\n\n"
+
+            "=== BLOK 1: KONSISTENSI IDENTITAS TRANSAKSI ===\n"
+            "1. Konsistensi nama transaksi: Nama rencana transaksi (misalnya 'Rencana Transaksi', "
+            "'Rencana Akuisisi', 'Rencana Pengalihan Saham') harus KONSISTEN di seluruh laporan — "
+            "cover, surat pengantar, ringkasan eksekutif, analisis, dan kesimpulan.\n"
+
+            "2. Konsistensi pihak-pihak transaksi: Nama penjual, pembeli, dan obyek transaksi "
+            "harus SAMA PERSIS di semua bagian. "
+            "KHUSUS: Cek apakah ada copy-paste nama dari laporan lain yang tidak relevan.\n"
+
+            "3. Konsistensi nilai transaksi: Nilai transaksi yang disebutkan (harga per saham, "
+            "total nilai transaksi) harus sama di semua bagian dan konsisten dengan hasil penilaian.\n"
+
+            "=== BLOK 2: KONSISTENSI ANALISIS KEWAJARAN ===\n"
+            "4. Kewajaran dari sisi keuangan: Pastikan analisis kewajaran finansial konsisten "
+            "antara narasi dan kesimpulan — apakah transaksi dinyatakan 'wajar' atau 'tidak wajar'.\n"
+
+            "5. Kewajaran dari sisi non-keuangan: Pastikan analisis manfaat strategis, risiko, "
+            "dan kondisi pasar konsisten antara analisis dan kesimpulan.\n"
+
+            "6. Referensi silang dengan laporan penilaian: Jika ada laporan penilaian yang "
+            "direferensikan, pastikan nilai yang dikutip sama dengan laporan penilaian aslinya.\n"
+
+            "=== BLOK 3: KESESUAIAN STANDAR POJK & KEPI/SPI ===\n"
+            "7. Elemen wajib Pendapat Kewajaran sesuai POJK 35/2020: Cek keberadaan: "
+            "(a) identitas pihak yang meminta pendapat kewajaran, "
+            "(b) deskripsi rencana transaksi, "
+            "(c) analisis kewajaran dari sisi keuangan, "
+            "(d) analisis kewajaran dari sisi non-keuangan, "
+            "(e) kesimpulan kewajaran, "
+            "(f) pernyataan independensi penilai, "
+            "(g) kondisi pembatas dan asumsi.\n"
+
+            "8. Transaksi afiliasi: Jika ini transaksi dengan pihak terafiliasi, pastikan "
+            "pengungkapan hubungan afiliasi sudah lengkap dan memadai.\n"
+
+            "=== BLOK 4: TYPO & INKONSISTENSI ===\n"
+            "9. Typo dan inkonsistensi penulisan: Cek ejaan nama perusahaan, nama orang, "
+            "tanggal, angka, dan akronim di seluruh dokumen.\n"
+
+            "10. Konsistensi kalimat berulang: Cek paragraf yang muncul di beberapa bagian "
+            "dan pastikan isinya identik.\n"
+
+            "Berikan temuan SPESIFIK dengan menyebutkan halaman/bagian dan nilai/kata yang "
+            "tidak konsisten. Prioritaskan temuan yang berdampak pada validitas pendapat kewajaran."
+        ),
+    },
 }
 
-CHECK_ITEMS_DEFAULT = [
+# Item cek untuk laporan properti (default)
+CHECK_ITEMS_PROPERTI = [
     "Konsistensi Tanggal (inspeksi, penilaian, laporan)",
     "Konsistensi Luas (tanah, bangunan, GFA, NLA)",
     "Konsistensi Alamat & Lokasi",
@@ -79,6 +215,47 @@ CHECK_ITEMS_DEFAULT = [
     "Kelengkapan Narasi & Deskripsi Objek",
 ]
 
+# Item cek khusus laporan penilaian saham
+CHECK_ITEMS_SAHAM = [
+    "Konsistensi nama perusahaan yang dinilai di seluruh laporan",
+    "Konsistensi persentase saham yang dinilai (misal 99,99%)",
+    "Typo/copy-paste nama perusahaan lain yang tidak relevan",
+    "Konsistensi nilai penilaian (USD & Rupiah) di semua bagian",
+    "Konsistensi konversi kurs BI (nilai USD x kurs = nilai Rupiah)",
+    "Konsistensi angka laporan posisi keuangan (Aset = Liabilitas + Ekuitas)",
+    "Konsistensi pemisahan aset operasional vs non-operasional",
+    "Konsistensi diskon likuiditas pasar (diterapkan/tidak + alasan)",
+    "Konsistensi nama Pemberi Tugas dan Pengguna Laporan",
+    "Konsistensi tanggal penilaian dan tanggal penerbitan laporan",
+    "Konsistensi nomor laporan di semua bagian",
+    "Konsistensi pendekatan & metode penilaian di semua bab",
+    "Copy-paste metode/pendekatan dari laporan lain yang tidak relevan",
+    "Kelengkapan elemen wajib POJK 35/2020",
+    "Konsistensi akronim dan singkatan perusahaan",
+    "Konsistensi paragraf berulang antar bab",
+    "Format penulisan angka konsisten (USD ribu / Rp juta)",
+]
+
+# Item cek khusus laporan pendapat kewajaran
+CHECK_ITEMS_FAIRNESS = [
+    "Konsistensi nama dan deskripsi rencana transaksi",
+    "Konsistensi nama pihak-pihak yang terlibat transaksi",
+    "Typo/copy-paste nama perusahaan/transaksi lain yang tidak relevan",
+    "Konsistensi nilai transaksi di semua bagian",
+    "Referensi silang dengan nilai laporan penilaian yang dirujuk",
+    "Konsistensi kesimpulan kewajaran (wajar/tidak wajar)",
+    "Konsistensi analisis kewajaran keuangan dan non-keuangan",
+    "Kelengkapan elemen wajib Pendapat Kewajaran POJK 35/2020",
+    "Pengungkapan hubungan afiliasi (jika transaksi dengan pihak terafiliasi)",
+    "Konsistensi tanggal penilaian, tanggal laporan, tanggal transaksi",
+    "Konsistensi identitas Pemberi Tugas dan Pengguna Laporan",
+    "Konsistensi akronim dan singkatan",
+    "Konsistensi paragraf berulang antar bab",
+    "Format penulisan angka konsisten",
+]
+
+CHECK_ITEMS_DEFAULT = CHECK_ITEMS_PROPERTI  # Fallback default
+
 SEVERITY_CONFIG = {
     "kritikal": {"emoji": "🔴", "color": "#c0392b", "bg": "#fff0f0"},
     "minor":    {"emoji": "🟡", "color": "#d4860a", "bg": "#fff8e6"},
@@ -86,8 +263,8 @@ SEVERITY_CONFIG = {
     "info":     {"emoji": "🔵", "color": "#1e6fbf", "bg": "#eef4ff"},
 }
 
-SYSTEM_PROMPT = """Kamu adalah expert QA auditor laporan penilaian properti di Indonesia.
-Kamu memahami standar KEPI, MAPPI, dan SPI (Standar Penilaian Indonesia) dengan sangat baik.
+SYSTEM_PROMPT = """Kamu adalah expert QA auditor laporan penilaian di Indonesia.
+Kamu memahami standar KEPI, MAPPI, dan SPI (Standar Penilaian Indonesia) dengan sangat baik. Kamu juga memahami POJK 35/2020 tentang Penilaian dan Penyajian Laporan Penilaian Bisnis di Pasar Modal, termasuk seluk-beluk laporan penilaian saham (business valuation) dan pendapat kewajaran (fairness opinion). Kamu paham bahwa kesalahan paling umum dalam laporan penilaian saham adalah: (1) copy-paste nama perusahaan/obyek dari laporan lain yang tidak diganti, (2) inkonsistensi nilai antara surat pengantar, ringkasan eksekutif, dan kesimpulan, (3) inkonsistensi angka keuangan antara tabel dan narasi, (4) kesalahan konversi kurs, dan (5) penggunaan pendekatan/metode yang tidak sesuai atau tidak konsisten.
 Tugasmu menganalisis laporan penilaian dan menemukan inkonsistensi, kesalahan, atau ketidaksesuaian standar.
 
 SELALU berikan output HANYA dalam format JSON yang valid, tanpa teks apapun di luar JSON.
@@ -680,9 +857,22 @@ def main():
 
         st.markdown("---")
         st.markdown("### ✅ Item yang Dicek")
+
+        # Pilih item berdasarkan mode
+        _mode_key = MODE_CONFIG[mode_label]["key"]
+        if _mode_key == "saham":
+            _items_pool = CHECK_ITEMS_SAHAM
+            _unchecked = []
+        elif _mode_key == "fairness":
+            _items_pool = CHECK_ITEMS_FAIRNESS
+            _unchecked = []
+        else:
+            _items_pool = CHECK_ITEMS_PROPERTI
+            _unchecked = ["Analisis Pasar & Data Pembanding", "Pendekatan & Metode Penilaian"]
+
         selected_items = []
-        for item in CHECK_ITEMS_DEFAULT:
-            default_checked = item not in ["Analisis Pasar & Data Pembanding", "Pendekatan & Metode Penilaian"]
+        for item in _items_pool:
+            default_checked = item not in _unchecked
             if st.checkbox(item, value=default_checked, key=f"chk_{item}"):
                 selected_items.append(item)
 
