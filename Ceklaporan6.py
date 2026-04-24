@@ -64,6 +64,117 @@ MODE_CONFIG = {
             "LANGKAH 3: Tandai temuan dengan nama objek yang relevan."
         ),
     },
+    "🏭 Penilaian Aset": {
+        "key": "aset",
+        "desc": "Khusus laporan penilaian aset/properti (tanah, bangunan, mesin, kendaraan).",
+        "instruction": (
+            "Ini adalah laporan PENILAIAN ASET/PROPERTI (dapat berupa pabrik, gedung, tanah, "
+            "atau kombinasi aset). Lakukan audit komprehensif dengan urutan berikut:\n\n"
+
+            "=== BLOK 1: KONSISTENSI IDENTITAS LAPORAN ===\n"
+            "1. Konsistensi nama obyek penilaian: Nama properti/aset, nama pemilik/atas nama "
+            "(misal: PT Golden Harvest Cocoa Indonesia), dan lokasi lengkap (jalan, desa, "
+            "kecamatan, kabupaten, provinsi) harus SAMA PERSIS di: cover, surat pengantar, "
+            "ringkasan eksekutif, uraian umum, dan kesimpulan. "
+            "KHUSUS: Cek copy-paste nama perusahaan/properti dari laporan lain yang tidak "
+            "diganti — ini adalah kesalahan paling umum di laporan SRR.\n"
+
+            "2. Konsistensi nomor laporan dan tanggal: "
+            "Nomor laporan (format: NNNNN/2.0059-02/PI/04/XXXX/1/III/YYYY), tanggal "
+            "penerbitan laporan, tanggal penilaian (cut-off date), dan tanggal inspeksi lapangan "
+            "harus konsisten dan logis — tanggal inspeksi boleh setelah tanggal penilaian "
+            "tapi tanggal laporan harus setelah tanggal inspeksi.\n"
+
+            "3. Konsistensi identitas pemberi tugas & pengguna laporan: "
+            "Nama, alamat, dan deskripsi pemberi tugas harus sama di surat pengantar "
+            "vs ringkasan eksekutif vs uraian umum. Jika ada pengguna laporan tambahan "
+            "(misal bank konsorsium), pastikan disebutkan konsisten.\n"
+
+            "=== BLOK 2: KONSISTENSI LUAS & SPESIFIKASI FISIK ===\n"
+            "4. Konsistensi luas tanah: Luas tanah total (m²) yang disebutkan di surat pengantar, "
+            "ringkasan eksekutif, uraian umum, dan tabel penilaian harus sama. "
+            "Cek juga: jumlah sertifikat × luas per sertifikat = total luas tanah.\n"
+
+            "5. Konsistensi luas bangunan: Luas bangunan total (m²) harus sama di semua bagian. "
+            "Jika ada perincian per bangunan/blok, pastikan penjumlahan sesuai total.\n"
+
+            "6. Konsistensi jumlah & identitas sertifikat tanah: "
+            "Jumlah sertifikat (SHGB/SHM/SHGU) yang disebutkan di surat pengantar, "
+            "uraian umum, dan daftar data tanah (Bagian E.1) harus sama. "
+            "Cek nomor sertifikat, tanggal terbit, tanggal berakhir, dan luas per sertifikat.\n"
+
+            "7. Konsistensi spesifikasi mesin: Untuk laporan yang mencakup mesin-mesin, "
+            "cek konsistensi nama/tipe mesin, tahun pembuatan, negara asal, dan kapasitas "
+            "antara tabel ringkasan nilai (D.1) dengan uraian detail mesin (E.4). "
+            "Cek juga pemisahan mesin yang DIGUNAKAN vs BELUM DIGUNAKAN.\n"
+
+            "8. Konsistensi spesifikasi kendaraan: Cek nomor polisi, merk, tipe, tahun, "
+            "kondisi fisik, dan kondisi ekonomis antara tabel kendaraan dengan uraian detail.\n"
+
+            "=== BLOK 3: KONSISTENSI NILAI ===\n"
+            "9. Konsistensi nilai kesimpulan: Nilai akhir penilaian (Rp dan USD) harus SAMA "
+            "PERSIS di: surat pengantar, resume penilaian/tabel ringkasan, ringkasan eksekutif "
+            "(Bab A), kesimpulan penilaian (Bab D.2). Cek juga terbilang sesuai angka.\n"
+
+            "10. Konsistensi nilai per komponen: Nilai masing-masing komponen (tanah, bangunan, "
+            "sarana pelengkap, mesin digunakan, mesin belum digunakan, kendaraan) di resume "
+            "penilaian harus sama dengan yang ada di tabel ringkasan Bab D.1 dan uraian "
+            "detail Bab E. Rumus: Total = Tanah + Bangunan + Sarana + Mesin + Kendaraan.\n"
+
+            "11. Konsistensi konversi kurs USD: Nilai Rupiah ÷ kurs BI = nilai USD. "
+            "Kurs BI harus sama di semua bagian laporan (biasanya di uraian umum/Bab B). "
+            "Cek konversi per komponen dan total.\n"
+
+            "12. Konsistensi BPB dan penyusutan: Biaya Pengganti Baru (BPB) dikurangi "
+            "penyusutan (%) harus menghasilkan nilai pasar yang tercantum di tabel. "
+            "Verifikasi: Nilai Pasar = BPB × (1 - Penyusutan%).\n"
+
+            "=== BLOK 4: KONSISTENSI PENDEKATAN & METODE ===\n"
+            "13. Konsistensi pendekatan penilaian per komponen: "
+            "Untuk laporan aset kompleks (pabrik): tanah → pendekatan pasar, "
+            "bangunan & sarana pelengkap → pendekatan biaya, "
+            "mesin-mesin → pendekatan biaya (metode indeks biaya), "
+            "kendaraan → pendekatan pasar. "
+            "Pastikan penerapan metode ini konsisten antara penjelasan di Bab B/C "
+            "dengan yang diterapkan di Bab D/E.\n"
+
+            "14. Konsistensi penggunaan tertinggi dan terbaik (HBU): "
+            "Jika disebut di ringkasan eksekutif, pastikan konsisten dengan analisis di uraian.\n"
+
+            "=== BLOK 5: KESESUAIAN STANDAR KEPI & SPI ===\n"
+            "15. Elemen wajib laporan penilaian aset sesuai KEPI & SPI: Cek keberadaan: "
+            "(a) pernyataan penilai (signing partner, reviewer, tim penilai), "
+            "(b) asumsi-asumsi dan kondisi pembatas, "
+            "(c) tujuan dan maksud penilaian, "
+            "(d) definisi nilai yang digunakan, "
+            "(e) tanggal penilaian dan tanggal inspeksi, "
+            "(f) pendekatan dan prosedur penilaian, "
+            "(g) data dan informasi yang digunakan, "
+            "(h) kejadian penting setelah tanggal penilaian.\n"
+
+            "16. Konsistensi IMB/dokumen perizinan: Jika ada nomor IMB atau izin lain, "
+            "pastikan nomor dan tanggalnya konsisten antara surat pengantar dan uraian.\n"
+
+            "=== BLOK 6: TYPO & INKONSISTENSI PENULISAN ===\n"
+            "17. Typo nama perusahaan/properti: Cek ejaan nama pemilik dan obyek penilaian "
+            "konsisten di seluruh dokumen (misalnya 'PT Golden Harvest Cocoa Indonesia' "
+            "tidak boleh muncul sebagai nama lain di bagian manapun).\n"
+
+            "18. Konsistensi format angka: Format penulisan nilai harus konsisten "
+            "(misal: Rp 2.593.463.082.000,00 vs Rp2.593.463.082.000 — pilih satu format). "
+            "Cek juga konsistensi satuan (Rp Ribu vs Rp 000,00 vs US$ ,00).\n"
+
+            "19. Konsistensi terbilang: Nilai terbilang (huruf) harus sesuai dengan angka. "
+            "Cek di surat pengantar dan kesimpulan penilaian.\n"
+
+            "20. Konsistensi paragraf berulang: Beberapa bagian laporan (obyek penilaian, "
+            "tujuan penilaian, dll) muncul di beberapa bab. Pastikan teksnya IDENTIK.\n"
+
+            "Berikan temuan SPESIFIK dengan menyebutkan bagian/halaman dan "
+            "nilai/teks yang tidak konsisten. Prioritaskan temuan yang mempengaruhi "
+            "validitas dan nilai penilaian."
+        ),
+    },
     "📈 Penilaian Saham": {
         "key": "saham",
         "desc": "Khusus laporan penilaian saham (Business Valuation) sesuai POJK 35/2020.",
@@ -252,6 +363,30 @@ CHECK_ITEMS_FAIRNESS = [
     "Konsistensi akronim dan singkatan",
     "Konsistensi paragraf berulang antar bab",
     "Format penulisan angka konsisten",
+]
+
+# Item cek khusus laporan penilaian aset/properti (pabrik, gedung, tanah, mesin)
+CHECK_ITEMS_ASET = [
+    "Konsistensi nama obyek penilaian & pemilik di seluruh laporan",
+    "Copy-paste nama perusahaan/properti dari laporan lain yang tidak diganti",
+    "Konsistensi nomor laporan, tanggal penilaian, tanggal inspeksi, tanggal laporan",
+    "Konsistensi identitas Pemberi Tugas & Pengguna Laporan",
+    "Konsistensi luas tanah total & per sertifikat (jumlah SHGB × luas = total)",
+    "Konsistensi luas bangunan total & per bangunan/blok",
+    "Konsistensi nomor, tanggal terbit, tanggal berakhir & luas sertifikat tanah",
+    "Konsistensi nilai kesimpulan (Rp & USD) di semua bagian laporan",
+    "Konsistensi nilai per komponen (tanah, bangunan, sarana, mesin, kendaraan)",
+    "Konsistensi konversi kurs BI (Rp ÷ kurs = USD, kurs sama di semua bagian)",
+    "Verifikasi BPB × (1 - penyusutan%) = nilai pasar per komponen",
+    "Konsistensi pemisahan mesin DIGUNAKAN vs BELUM DIGUNAKAN",
+    "Konsistensi spesifikasi mesin (nama, tipe, tahun, kapasitas) tabel vs uraian",
+    "Konsistensi spesifikasi kendaraan (nopol, merk, tipe, tahun) tabel vs uraian",
+    "Konsistensi pendekatan penilaian per komponen (pasar/biaya/pendapatan)",
+    "Konsistensi terbilang (huruf) sesuai angka di surat pengantar & kesimpulan",
+    "Kelengkapan elemen wajib KEPI & SPI (pernyataan penilai, asumsi, dst)",
+    "Konsistensi format penulisan angka dan satuan (Rp Ribu, US$, m²)",
+    "Konsistensi paragraf berulang antar bab (obyek penilaian, tujuan, dll)",
+    "Konsistensi nomor IMB/perizinan jika ada",
 ]
 
 CHECK_ITEMS_DEFAULT = CHECK_ITEMS_PROPERTI  # Fallback default
@@ -866,6 +1001,9 @@ def main():
         elif _mode_key == "fairness":
             _items_pool = CHECK_ITEMS_FAIRNESS
             _unchecked = []
+        elif _mode_key == "aset":
+            _items_pool = CHECK_ITEMS_ASET
+            _unchecked = ["Konsistensi nomor IMB/perizinan jika ada"]
         else:
             _items_pool = CHECK_ITEMS_PROPERTI
             _unchecked = ["Analisis Pasar & Data Pembanding", "Pendekatan & Metode Penilaian"]
