@@ -1219,6 +1219,283 @@ def render_summary_cards(s: dict):
 
 
 # ══════════════════════════════════════════════
+# HELPER: DOCUMENT PREVIEW
+# ══════════════════════════════════════════════
+
+def extract_keywords(finding: dict) -> list:
+    """Ekstrak kata kunci pencarian dari sebuah finding."""
+    keywords = []
+    detail = finding.get("detail", "")
+    title  = finding.get("title", "")
+
+    # Ekstrak angka besar (nilai Rp/USD) dari detail dan title
+    for pat in [
+        r"Rp\s*([\d][.\d,]+)",
+        r"US\$\s*([\d][.\d,]+)",
+        r"([\d]{3}\.[\d]{3}\.[\d]{3})",  # format angka seperti 221.159.000
+    ]:
+        for m in re.findall(pat, detail + " " + title, re.IGNORECASE):
+            cleaned = m.strip().rstrip(".,")
+            if cleaned:
+                keywords.append(cleaned)
+
+    # Ekstrak kata kunci spesifik: tanggal, nomor sertifikat, nama unik
+    for pat in [
+        r"\d{1,2}\s+(?:Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember)\s+\d{4}",
+        r"No\.\s+[\w\-/]+",
+        r"SHGB?\s+No[\.\s]+\d+",
+        r"[A-Z]{2,}\s+No[\.\s]+[\d/]+",
+    ]:
+        for m in re.findall(pat, detail + " " + title, re.IGNORECASE):
+            if len(m) > 4:
+                keywords.append(m.strip())
+
+    # Ekstrak teks dalam tanda kutip (kata/frasa spesifik yang dikutip)
+    for m in re.findall(r'[\u2018\u2019"](\w[\w\s\-.]{2,38}\w)[\u2018\u2019\u201d"]', detail):
+        keywords.append(m.strip())
+
+    # Deduplicate, prioritaskan yang lebih panjang
+    seen = set()
+    result = []
+    for kw in sorted(keywords, key=len, reverse=True):
+        norm = kw.lower().replace(" ", "")
+        if norm not in seen and len(kw) >= 3:
+            seen.add(norm)
+            result.append(kw)
+
+    return result[:8]  # max 8 keywords
+
+
+def parse_page_hints(page_hint: str) -> list:
+    """
+    Parse page_hint string menjadi list nomor halaman (sebagai string).
+    Menangani: angka arab, romawi, range (1-8), multiple hints.
+    Contoh: 'Hal. x vs Hal. xi' -> ['10', '11']
+            'Hal. 1-8' -> ['1','2','3','4','5','6','7','8']
+    """
+    if not page_hint:
+        return []
+
+    romawi_map = {
+        "i":1,"ii":2,"iii":3,"iv":4,"v":5,"vi":6,"vii":7,
+        "viii":8,"ix":9,"x":10,"xi":11,"xii":12,"xiii":13,
+        "xiv":14,"xv":15,"xvi":16,"xvii":17,"xviii":18,"xix":19,"xx":20
+    }
+    pages = []
+
+    # Cari semua "Hal. X" atau "Hal X" (angka arab / romawi / range)
+    for m in re.finditer(r'(?:hal|halaman|page)[\.\s]+([^\s,;()vs]+)', page_hint, re.IGNORECASE):
+        raw = m.group(1).strip().lower().rstrip(".,)")
+        if raw in romawi_map:
+            pages.append(str(romawi_map[raw]))
+        elif raw.isdigit():
+            pages.append(raw)
+        else:
+            rng = re.match(r'(\d+)[-\u2013](\d+)', raw)
+            if rng:
+                s, e = int(rng.group(1)), int(rng.group(2))
+                pages.extend([str(i) for i in range(s, min(e + 1, s + 15))])
+
+    # Scan teks untuk romawi standalone (mis: "vs Hal. xi (kesimpulan)")
+    for rn, rv in romawi_map.items():
+        if re.search(r'\b' + rn + r'\b', page_hint, re.IGNORECASE):
+            val = str(rv)
+            if val not in pages:
+                pages.append(val)
+
+    # Range numerik standalone: "1-8" atau "1–8"
+    for rng in re.finditer(r'\b(\d+)[-\u2013](\d+)\b', page_hint):
+        s, e = int(rng.group(1)), int(rng.group(2))
+        for i in range(s, min(e + 1, s + 15)):
+            val = str(i)
+            if val not in pages:
+                pages.append(val)
+
+    return list(dict.fromkeys(pages))[:12]
+
+
+def find_pages_for_finding(finding: dict, all_pages: list) -> list:
+    """
+    Cari halaman-halaman yang relevan dengan sebuah finding.
+    Kembalikan list dict: {page_num, text, matches, score}
+    """
+    if not all_pages:
+        return []
+
+    keywords = extract_keywords(finding)
+    hint_pages = parse_page_hints(finding.get("page_hint", ""))
+    results = []
+
+    for page_num, page_text in enumerate(all_pages, start=1):
+        if not page_text or not page_text.strip():
+            continue
+
+        score = 0
+        matched_kws = []
+
+        # Bonus jika nomor halaman sesuai hint
+        page_num_str = str(page_num)
+        # Konversi romawi sederhana
+        romawi_map = {"i":1,"ii":2,"iii":3,"iv":4,"v":5,"vi":6,"vii":7,
+                      "viii":8,"ix":9,"x":10,"xi":11,"xii":12,"xiii":13,
+                      "xiv":14,"xv":15,"xvi":16,"xvii":17,"xviii":18,"xix":19,"xx":20}
+        for hp in hint_pages:
+            hp_lower = hp.lower()
+            if hp == page_num_str:
+                score += 30
+            elif hp_lower in romawi_map and romawi_map[hp_lower] == page_num:
+                score += 30
+
+        # Score berdasarkan keyword match
+        page_lower = page_text.lower()
+        for kw in keywords:
+            kw_lower = kw.lower().replace(".", r"\.")
+            # Hitung kemunculan
+            try:
+                count = len(re.findall(re.escape(kw.lower()), page_lower))
+            except re.error:
+                count = page_lower.count(kw.lower())
+            if count > 0:
+                score += min(count * 10, 30)
+                matched_kws.append(kw)
+
+        if score > 0:
+            results.append({
+                "page_num":   page_num,
+                "text":       page_text,
+                "matches":    matched_kws,
+                "score":      score,
+                "hint_match": any(
+                    hp == str(page_num) or
+                    (hp.lower() in romawi_map and romawi_map[hp.lower()] == page_num)
+                    for hp in hint_pages
+                ),
+            })
+
+    # Urutkan: hint_match dulu, lalu score tertinggi
+    results.sort(key=lambda x: (x["hint_match"], x["score"]), reverse=True)
+    return results[:5]  # max 5 halaman terrelevant
+
+
+def highlight_keywords_in_text(text: str, keywords: list) -> str:
+    """Highlight keyword di teks dengan tag HTML mark."""
+    if not keywords:
+        return text
+    # Escape HTML dahulu
+    escaped = (text
+               .replace("&", "&amp;")
+               .replace("<", "&lt;")
+               .replace(">", "&gt;"))
+    # Highlight per keyword (terpanjang dulu untuk hindari double-highlight)
+    for kw in sorted(keywords, key=len, reverse=True):
+        if not kw or len(kw) < 3:
+            continue
+        try:
+            pattern = re.compile(re.escape(kw), re.IGNORECASE)
+            escaped = pattern.sub(
+                lambda m: f'<mark style="background:#fef08a;color:#1a1a2e;'
+                          f'padding:0 2px;border-radius:2px;font-weight:700;">'
+                          f'{m.group()}</mark>',
+                escaped
+            )
+        except re.error:
+            pass
+    return escaped
+
+
+def render_finding_with_preview(finding: dict, all_pages: list, card_key: str):
+    """
+    Render finding card + tombol preview dokumen.
+    all_pages: list halaman teks dari dokumen.
+    card_key: unique key untuk Streamlit widgets.
+    """
+    sev   = finding.get("severity", "info")
+    cfg   = SEVERITY_CONFIG.get(sev, SEVERITY_CONFIG["info"])
+    color = cfg["color"]
+    bg    = cfg["bg"]
+    cat   = finding.get("category", "")
+    prop  = finding.get("property", "")
+    title = finding.get("title", "")
+    detail= finding.get("detail", "")
+    hint  = finding.get("page_hint", "")
+    fid   = finding.get("id", "")
+    prop_tag = f' &nbsp;·&nbsp; <span style="color:#1e6fbf;">📌 {prop}</span>' if prop else ""
+
+    # Render card utama
+    st.markdown(f"""
+<div style="background:{bg};border:1px solid {color}40;border-left:4px solid {color};
+            border-radius:8px;padding:14px 16px;margin-bottom:4px;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="background:{color}22;color:{color};border:1px solid {color};
+                     font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;
+                     text-transform:uppercase;letter-spacing:.5px;">{cfg["emoji"]} {sev}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;">{cat}{prop_tag}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">{fid} &nbsp; {hint}</span>
+    </div>
+    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{title}</div>
+    <div style="font-size:12px;color:#444;font-family:monospace;background:#ffffff;
+                padding:8px 12px;border-radius:6px;line-height:1.6;
+                border:1px solid #e0e0e0;">{detail}</div>
+</div>""", unsafe_allow_html=True)
+
+    # Tombol preview — hanya tampil jika ada halaman dokumen
+    if all_pages:
+        keywords = extract_keywords(finding)
+        btn_label = f"📄 Lihat Preview Dokumen"
+        if hint:
+            btn_label += f" ({hint})"
+        with st.expander(btn_label, expanded=False):
+            relevant_pages = find_pages_for_finding(finding, all_pages)
+            if not relevant_pages:
+                st.caption("⚠️ Tidak ada halaman yang cocok ditemukan untuk temuan ini.")
+            else:
+                st.caption(
+                    f"Ditemukan **{len(relevant_pages)}** halaman relevan · "
+                    f"Keywords: {', '.join(f'`{k}`' for k in keywords[:4])}"
+                )
+                for pr in relevant_pages:
+                    badge = "📍 sesuai hint" if pr["hint_match"] else f"skor: {pr['score']}"
+                    kw_str = ", ".join(f'`{k}`' for k in pr["matches"][:4]) if pr["matches"] else "—"
+                    with st.container():
+                        st.markdown(
+                            f'<div style="display:flex;align-items:center;gap:8px;margin:8px 0 4px;">' +
+                            f'<span style="background:#1a9e67;color:#fff;font-size:10px;font-weight:700;' +
+                            f'padding:2px 8px;border-radius:4px;font-family:monospace;">HAL. {pr["page_num"]}</span>' +
+                            f'<span style="font-size:11px;color:#6b7280;font-family:monospace;">{badge}</span>' +
+                            f'<span style="font-size:11px;color:#6b7280;">Keywords ditemukan: {kw_str}</span>' +
+                            f'</div>',
+                            unsafe_allow_html=True
+                        )
+                        # Trim text ke sekitar 1200 karakter, fokus di area keyword
+                        page_text = pr["text"]
+                        if len(page_text) > 1500:
+                            # Cari posisi keyword pertama lalu ambil window
+                            best_pos = 0
+                            for kw in pr["matches"][:3]:
+                                pos = page_text.lower().find(kw.lower())
+                                if pos > 0:
+                                    best_pos = max(0, pos - 200)
+                                    break
+                            page_text = page_text[best_pos:best_pos + 1500]
+                            if best_pos > 0:
+                                page_text = "…" + page_text
+                            if best_pos + 1500 < len(pr["text"]):
+                                page_text = page_text + "…"
+
+                        highlighted = highlight_keywords_in_text(page_text, keywords)
+                        st.markdown(
+                            f'<div style="background:#f8fafb;border:1px solid #dde3ea;' +
+                            f'border-radius:6px;padding:12px 14px;font-family:monospace;' +
+                            f'font-size:12px;line-height:1.7;color:#374151;' +
+                            f'white-space:pre-wrap;word-break:break-word;max-height:350px;' +
+                            f'overflow-y:auto;">{highlighted}</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════
 # MAIN APP
 # ══════════════════════════════════════════════
 
@@ -1428,6 +1705,8 @@ def main():
                     all_pages.extend(pages)
                     file_info.append(f"{f.name} ({len(pages)} hal.)")
                 doc_text = pages_to_text(all_pages)
+                # Simpan pages ke session_state untuk preview dokumen
+                st.session_state["doc_pages"] = all_pages
                 status.update(label=f"✅ {len(all_pages)} halaman dibaca dari {len(all_files)} file", state="complete")
 
             # ── CEK MATEMATIKA (berjalan sebelum Claude, instan) ──
@@ -1521,8 +1800,10 @@ def main():
                         f'width:200px;margin-left:10px;vertical-align:middle;"></span></div>',
                         unsafe_allow_html=True
                     )
-                    for f in group:
-                        render_finding_card(f)
+                    for fi, f in enumerate(group):
+                        card_key = f"find_{sev}_{fi}_{f.get('id','x')}"
+                        _pages = st.session_state.get("doc_pages", [])
+                        render_finding_with_preview(f, _pages, card_key)
             else:
                 st.success("✅ Tidak ada temuan — laporan terlihat konsisten.")
 
@@ -1627,7 +1908,7 @@ def main():
                             f'width:160px;margin-left:10px;vertical-align:middle;"></span></div>',
                             unsafe_allow_html=True
                         )
-                        for mf in grp:
+                        for mfi, mf in enumerate(grp):
                             formula_html = ""
                             if mf.get("formula") and mf["formula"] != "-":
                                 formula_html = (
@@ -1742,7 +2023,8 @@ def main():
                     if exec_s:
                         st.caption(exec_s)
                     if st.button("Tampilkan Detail Temuan", key=f"hist_{audit_id}"):
-                        for f in r.get("result", {}).get("findings", []):
+                        for fi, f in enumerate(r.get("result", {}).get("findings", [])):
+                            # Riwayat tidak punya pages, render tanpa preview
                             render_finding_card(f)
 
             st.markdown("---")
