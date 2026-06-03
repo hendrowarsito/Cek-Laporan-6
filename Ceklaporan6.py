@@ -2804,35 +2804,17 @@ div[data-testid="stExpander"] { background: #fff; border: 1px solid #dde3ea; bor
             # ── Sub-tab 1: Temuan AI ──────────────────────────────────────
             with rtab1:
                 findings = result.get("findings", [])
-                if findings:
-                    filter_prop = None
-                    if len(properties) > 1:
-                        sel = st.selectbox("Filter per objek:", ["Semua Objek"] + properties, key="prop_filter")
-                        if sel != "Semua Objek":
-                            filter_prop = sel
-                    grouped = {}
-                    for f in findings:
-                        if filter_prop and f.get("property") and f["property"] != filter_prop:
-                            continue
-                        grouped.setdefault(f.get("severity", "info"), []).append(f)
-
-                    for sev in ["kritikal", "minor", "ok", "info"]:
-                        group = grouped.get(sev, [])
-                        if not group: continue
-                        cfg = SEVERITY_CONFIG[sev]
-                        st.markdown(
-                            f'<div style="font-size:11px;font-family:monospace;color:#6b7280;'
-                            f'text-transform:uppercase;letter-spacing:1.5px;margin:16px 0 8px;">'
-                            f'{cfg["emoji"]} {sev.upper()} ({len(group)})'
-                            f'<span style="display:inline-block;height:1px;background:#dde3ea;'
-                            f'width:200px;margin-left:10px;vertical-align:middle;"></span></div>',
-                            unsafe_allow_html=True
-                        )
-                        for fi, f in enumerate(group):
-                            _pages = st.session_state.get("doc_pages", [])
-                            render_finding_with_preview(f, _pages, f"find_{sev}_{fi}_{f.get('id','x')}")
-                else:
-                    st.success("✅ Tidak ada temuan AI — laporan terlihat konsisten.")
+                filter_prop = None
+                if len(properties) > 1:
+                    sel = st.selectbox("Filter per objek:", ["Semua Objek"] + properties, key="prop_filter")
+                    if sel != "Semua Objek":
+                        filter_prop = sel
+                filtered_findings = [
+                    f for f in findings
+                    if not (filter_prop and f.get("property") and f["property"] != filter_prop)
+                ]
+                _pages = st.session_state.get("doc_pages", [])
+                render_findings_as_sections(filtered_findings, _pages)
 
                 with st.expander("🔧 Raw JSON Output (debug)"):
                     st.code(raw_text, language="json")
