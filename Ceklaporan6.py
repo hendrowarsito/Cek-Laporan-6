@@ -2031,6 +2031,267 @@ def render_finding_with_preview(finding: dict, all_pages: list, card_key: str):
     st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
 
 
+def render_findings_as_sections(findings: list, all_pages: list):
+    """
+    Render findings grouped into numbered sections with HTML table format,
+    matching the design: section header + table per category group.
+    """
+    if not findings:
+        st.success("✅ Tidak ada temuan AI — laporan terlihat konsisten.")
+        return
+
+    # Helper HTML for the standard bordered table
+    TABLE_STYLE = (
+        "width:100%;border-collapse:collapse;font-size:13px;"
+        "background:#fff;border:1px solid #dde3ea;border-radius:8px;"
+        "overflow:hidden;margin-bottom:24px;"
+    )
+    TH_STYLE = "padding:10px 12px;text-align:left;font-size:11px;color:#6b7280;background:#f8fafb;border-bottom:2px solid #dde3ea;border-right:1px solid #dde3ea;"
+    TD_STYLE = "padding:10px 12px;border-bottom:1px solid #f0f0f0;border-right:1px solid #f0f0f0;vertical-align:top;"
+    TD_NO_STYLE = "padding:10px 12px;border-bottom:1px solid #f0f0f0;border-right:1px solid #f0f0f0;vertical-align:top;width:36px;color:#9ca3af;font-size:12px;font-family:monospace;"
+    TD_LOKASI_STYLE = "padding:10px 12px;border-bottom:1px solid #f0f0f0;border-right:1px solid #f0f0f0;vertical-align:top;width:160px;font-size:12px;color:#6b7280;font-family:monospace;"
+
+    def severity_badge(sev):
+        cfg = SEVERITY_CONFIG.get(sev, SEVERITY_CONFIG["info"])
+        return (f'<span style="background:{cfg["color"]}22;color:{cfg["color"]};'
+                f'border:1px solid {cfg["color"]};font-size:10px;font-weight:700;'
+                f'padding:1px 6px;border-radius:3px;text-transform:uppercase;">'
+                f'{cfg["emoji"]} {sev}</span>')
+
+    def bold_text(text):
+        """Bold words between ** markers."""
+        return re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', str(text))
+
+    # Categorize findings
+    section_findings = {s["key"]: [] for s in SECTION_CONFIG}
+    catch_all_key = SECTION_CONFIG[-1]["key"]  # "lainlain"
+
+    category_to_key = {}
+    for s in SECTION_CONFIG:
+        for cat in s["categories"]:
+            category_to_key[cat.lower()] = s["key"]
+
+    for f in findings:
+        cat = f.get("category", "").strip()
+        skey = category_to_key.get(cat.lower())
+        if skey is None:
+            skey = catch_all_key
+        section_findings[skey].append(f)
+
+    # Render each section that has findings
+    for sec in SECTION_CONFIG:
+        items = section_findings[sec["key"]]
+        if not items:
+            continue
+
+        # Section header
+        st.markdown(f"""
+<div style="margin-top:28px;margin-bottom:12px;">
+    <span style="font-size:15px;font-weight:800;color:#1a1a2e;letter-spacing:-0.3px;">
+        {sec['num']}. {sec['title']}
+    </span>
+</div>""", unsafe_allow_html=True)
+
+        style = sec["style"]
+
+        # ── Narrative style (for Artefak Copy-Paste / Section 2) ──
+        if style == "narrative":
+            # Show warning box
+            st.markdown("""
+<div style="background:#fff8e6;border:1px solid #f5e0a0;border-radius:8px;
+            padding:10px 14px;margin-bottom:14px;font-size:13px;color:#7c5800;">
+    ⚠️ Ini adalah masalah paling serius dalam dokumen ini.
+</div>""", unsafe_allow_html=True)
+            for idx, f in enumerate(items, 1):
+                sev = f.get("severity", "info")
+                cfg = SEVERITY_CONFIG.get(sev, SEVERITY_CONFIG["info"])
+                sub_label = chr(96 + idx)  # 'a', 'b', 'c', ...
+                title = f.get("title", "")
+                detail = f.get("detail", "")
+                page_hint = f.get("page_hint", "")
+
+                # Extract quoted text from detail
+                detail_lines = detail.split("\n")
+                main_lines = []
+                quote_lines = []
+                for line in detail_lines:
+                    stripped = line.strip()
+                    if stripped.startswith('"') and stripped.endswith('"'):
+                        quote_lines.append(stripped)
+                    elif stripped.startswith('•') or stripped.startswith('-'):
+                        main_lines.append(f'<li style="margin-bottom:4px;">{stripped[1:].strip()}</li>')
+                    else:
+                        main_lines.append(f'<p style="margin:4px 0;">{stripped}</p>')
+
+                quotes_html = ""
+                for q in quote_lines:
+                    quotes_html += (
+                        f'<blockquote style="border-left:3px solid #d4860a;padding:6px 12px;'
+                        f'margin:8px 0;background:#fffbf0;color:#5c4000;font-style:italic;'
+                        f'font-size:13px;">{q}</blockquote>'
+                    )
+
+                bullets_exist = any("<li" in l for l in main_lines)
+                if bullets_exist:
+                    li_items = "".join(l for l in main_lines if "<li" in l)
+                    p_items = "".join(l for l in main_lines if "<li" not in l)
+                    content_html = f'<ul style="padding-left:20px;margin:6px 0;">{li_items}</ul>{p_items}'
+                else:
+                    content_html = "".join(main_lines)
+
+                st.markdown(f"""
+<div style="background:{cfg['bg']};border:1px solid {cfg['color']}40;
+            border-left:4px solid {cfg['color']};border-radius:8px;
+            padding:14px 16px;margin-bottom:12px;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <span style="font-size:14px;font-weight:800;color:#1a1a2e;">
+            {sec['num']}{sub_label}. {title}
+        </span>
+        {severity_badge(sev)}
+        <span style="font-size:11px;color:#9ca3af;font-family:monospace;margin-left:auto;">{page_hint}</span>
+    </div>
+    <div style="font-size:13px;color:#374151;line-height:1.7;">{content_html}</div>
+    {quotes_html}
+</div>""", unsafe_allow_html=True)
+            continue
+
+        # ── Table styles ──
+        if style == "table_typo":
+            headers = ["No", "Lokasi", "Teks Salah", "Seharusnya"]
+            rows_html = ""
+            for i, f in enumerate(items, 1):
+                sev = f.get("severity", "minor")
+                badge = severity_badge(sev)
+                lokasi = f.get("page_hint", "—")
+                teks_salah = f.get("teks_salah") or f.get("title", "")
+                seharusnya = f.get("seharusnya") or ""
+                if not seharusnya:
+                    detail = f.get("detail", "")
+                    m = re.search(r'seharusnya[:\s]+"?([^"\n]+)"?', detail, re.IGNORECASE)
+                    if m:
+                        seharusnya = m.group(1).strip()
+                    else:
+                        seharusnya = detail[:120] if detail else "—"
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="{TD_NO_STYLE}">{i}</td>'
+                    f'<td style="{TD_LOKASI_STYLE}">{lokasi} {badge}</td>'
+                    f'<td style="{TD_STYLE}"><code style="font-size:12px;background:#fff5f5;'
+                    f'padding:1px 4px;border-radius:3px;color:#c0392b;">{teks_salah}</code></td>'
+                    f'<td style="{TD_STYLE}">{bold_text(seharusnya)}</td>'
+                    f'</tr>'
+                )
+            st.markdown(f"""
+<table style="{TABLE_STYLE}">
+<thead><tr>
+{''.join(f'<th style="{TH_STYLE}">{h}</th>' for h in headers)}
+</tr></thead>
+<tbody>{rows_html}</tbody>
+</table>""", unsafe_allow_html=True)
+
+        elif style == "table_nama":
+            headers = ["No", "Lokasi", "Teks", "Catatan"]
+            rows_html = ""
+            for i, f in enumerate(items, 1):
+                sev = f.get("severity", "minor")
+                badge = severity_badge(sev)
+                lokasi = f.get("page_hint", "—")
+                teks = f.get("title", "—")
+                catatan = f.get("detail", "—")
+                if len(catatan) > 200:
+                    catatan = catatan[:200] + "…"
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="{TD_NO_STYLE}">{i}</td>'
+                    f'<td style="{TD_LOKASI_STYLE}">{lokasi} {badge}</td>'
+                    f'<td style="{TD_STYLE}"><strong>{teks}</strong></td>'
+                    f'<td style="{TD_STYLE}">{bold_text(catatan)}</td>'
+                    f'</tr>'
+                )
+            st.markdown(f"""
+<table style="{TABLE_STYLE}">
+<thead><tr>
+{''.join(f'<th style="{TH_STYLE}">{h}</th>' for h in headers)}
+</tr></thead>
+<tbody>{rows_html}</tbody>
+</table>""", unsafe_allow_html=True)
+
+        elif style == "table_ejaan":
+            headers = ["No", "Masalah", "Contoh"]
+            rows_html = ""
+            for i, f in enumerate(items, 1):
+                sev = f.get("severity", "minor")
+                badge = severity_badge(sev)
+                masalah = f.get("title", "—")
+                contoh = f.get("detail", "—")
+                if len(contoh) > 300:
+                    contoh = contoh[:300] + "…"
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="{TD_NO_STYLE}">{i} {badge}</td>'
+                    f'<td style="{TD_STYLE}">{bold_text(masalah)}</td>'
+                    f'<td style="{TD_STYLE}">{bold_text(contoh)}</td>'
+                    f'</tr>'
+                )
+            st.markdown(f"""
+<table style="{TABLE_STYLE}">
+<thead><tr>
+{''.join(f'<th style="{TH_STYLE}">{h}</th>' for h in headers)}
+</tr></thead>
+<tbody>{rows_html}</tbody>
+</table>""", unsafe_allow_html=True)
+
+        elif style == "table_lokasi_keterangan":
+            headers = ["No", "Lokasi", "Keterangan"]
+            rows_html = ""
+            for i, f in enumerate(items, 1):
+                sev = f.get("severity", "kritikal")
+                badge = severity_badge(sev)
+                lokasi = f.get("page_hint", "—")
+                keterangan = f.get("detail") or f.get("title", "—")
+                if len(keterangan) > 300:
+                    keterangan = keterangan[:300] + "…"
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="{TD_NO_STYLE}">{i}</td>'
+                    f'<td style="{TD_LOKASI_STYLE}">{lokasi} {badge}</td>'
+                    f'<td style="{TD_STYLE}">{bold_text(keterangan)}</td>'
+                    f'</tr>'
+                )
+            st.markdown(f"""
+<table style="{TABLE_STYLE}">
+<thead><tr>
+{''.join(f'<th style="{TH_STYLE}">{h}</th>' for h in headers)}
+</tr></thead>
+<tbody>{rows_html}</tbody>
+</table>""", unsafe_allow_html=True)
+
+        else:  # table_lokasi_masalah (default)
+            headers = ["No", "Lokasi", "Masalah"]
+            rows_html = ""
+            for i, f in enumerate(items, 1):
+                sev = f.get("severity", "info")
+                badge = severity_badge(sev)
+                lokasi = f.get("page_hint", "—")
+                masalah = f.get("detail") or f.get("title", "—")
+                if len(masalah) > 400:
+                    masalah = masalah[:400] + "…"
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="{TD_NO_STYLE}">{i}</td>'
+                    f'<td style="{TD_LOKASI_STYLE}">{lokasi} {badge}</td>'
+                    f'<td style="{TD_STYLE}">{bold_text(masalah)}</td>'
+                    f'</tr>'
+                )
+            st.markdown(f"""
+<table style="{TABLE_STYLE}">
+<thead><tr>
+{''.join(f'<th style="{TH_STYLE}">{h}</th>' for h in headers)}
+</tr></thead>
+<tbody>{rows_html}</tbody>
+</table>""", unsafe_allow_html=True)
+
+
 def render_excel_comparison(comparison: dict):
     """Render hasil komparasi dokumen vs Excel."""
     if not comparison:
