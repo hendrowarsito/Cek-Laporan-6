@@ -133,6 +133,13 @@ MODE_CONFIG = {
             "E. DUPLIKASI TEKS: Cek paragraf yang diulang verbatim di beberapa bab — "
             "pastikan isinya identik, tidak ada perbedaan kecil yang menyesatkan.\n\n"
 
+            "F. TYPO KARAKTER (WAJIB): Scan setiap kata dalam dokumen untuk:\n"
+            "   - Huruf ganda tidak lazim: 'berrdasarkan', 'deengan', 'adaalah', "
+            "'bahwwa', 'terrmasuk', 'peruusahaan', 'kerrja', dll.\n"
+            "   - Huruf hilang: 'berdsarkan', 'penilain', 'keuangn', dll.\n"
+            "   - Kata duplikat: 'bahwa bahwa', 'yang yang', 'pada pada', dll.\n"
+            "   Laporkan setiap typo dengan kutipan kalimat dan koreksi yang benar.\n\n"
+
             "Berikan temuan SPESIFIK dengan menyebutkan bagian/halaman dan teks yang bermasalah."
         ),
     },
@@ -259,13 +266,20 @@ MODE_CONFIG = {
             "antara pernyataan dan metode yang dipilih.\n\n"
 
             "=== BLOK 5: TYPO & INKONSISTENSI PENULISAN ===\n"
-            "14. Typo nama perusahaan: ejaan harus konsisten di seluruh dokumen.\n"
-            "15. Akronim/singkatan: setiap akronim yang didefinisikan harus "
+            "14. TYPO KARAKTER — scan setiap kata dalam dokumen:\n"
+            "    - Huruf ganda tidak lazim: 'berrdasarkan', 'deengan', 'adaalah', "
+            "'bahwwa', 'terrmasuk', 'untukk', 'peruusahaan', dll.\n"
+            "    - Huruf hilang: 'berdsarkan', 'penilaian' → 'penilain', dll.\n"
+            "    - Kata duplikat berturut-turut: 'bahwa bahwa', 'yang yang', dll.\n"
+            "    Laporkan SETIAP typo yang ditemukan sebagai temuan minor tersendiri "
+            "dengan kutipan kalimat dan koreksi yang benar.\n"
+            "15. Typo nama perusahaan: ejaan harus konsisten di seluruh dokumen.\n"
+            "16. Akronim/singkatan: setiap akronim yang didefinisikan harus "
             "digunakan konsisten setelahnya.\n"
-            "16. Paragraf berulang: laporan sering mengulang teks di beberapa bab "
+            "17. Paragraf berulang: laporan sering mengulang teks di beberapa bab "
             "(latar belakang, deskripsi penugasan, dll). Pastikan IDENTIK.\n"
-            "17. Format angka: konsisten (USD ribu / Rp juta / Rp miliar).\n"
-            "18. 'batu bara' vs 'batubara', 'Jl.' vs 'Jalan' — pilih satu format.\n\n"
+            "18. Format angka: konsisten (USD ribu / Rp juta / Rp miliar).\n"
+            "19. 'batu bara' vs 'batubara', 'Jl.' vs 'Jalan' — pilih satu format.\n\n"
 
             "=== BLOK 6: DETEKSI KHUSUS ===\n"
             "19. Artefak copy-paste: cari nama entitas/paragraf dari laporan lain "
@@ -401,6 +415,14 @@ KESALAHAN PALING UMUM yang wajib kamu deteksi:
 4. FOOTER/HEADER SALAH: bab dengan footer nama laporan atau obyek yang berbeda.
 5. INKONSISTENSI NILAI: angka yang sama disebut berbeda di bagian yang berbeda.
 6. INKONSISTENSI NAMA: nama perusahaan/obyek penilaian berbeda ejaan di bagian berbeda.
+7. TYPO DAN SALAH KETIK: Scan SETIAP kata dalam dokumen untuk menemukan:
+   - Huruf ganda yang salah: "berrdasarkan", "deengan", "adaalah", "bahwwa", "untukk", dll.
+   - Huruf hilang: "berdsarkan" (tanpa 'a'), "keuangn" (tanpa 'a'), dll.
+   - Spasi salah: "danpada" (seharusnya "dan pada"), "disebutkan bahwa" ditulis tanpa spasi.
+   - Salah huruf: "diperlkukan" → "diperlukan", "pemilk" → "pemilik".
+   - Kata ulang tidak sempurna dalam konteks formal.
+   PENTING: Laporkan SETIAP typo yang ditemukan sebagai temuan tersendiri (severity: minor),
+   sebutkan kata yang salah, kutip kalimatnya, dan sebutkan koreksi yang benar.
 
 SELALU berikan output HANYA dalam format JSON yang valid, tanpa teks apapun di luar JSON.
 Gunakan struktur PERSIS berikut:
@@ -670,12 +692,179 @@ def build_excel_context_for_prompt(excel_data: dict, max_chars: int = 8000) -> s
 # LOKAL CHECKER: ARTEFAK & PLACEHOLDER
 # ══════════════════════════════════════════════
 
+def cek_typo_lokal(doc_text: str) -> list:
+    """
+    Deteksi typo lokal menggunakan regex tanpa AI.
+    Mencari:
+    1. Huruf konsonan ganda yang tidak lazim dalam bahasa Indonesia
+       (rr, tt, dd, bb, gg, hh, jj, pp, ff, vv, ww, cc, qq, yy, zz)
+    2. Pola kata yang sangat umum salah ketik di laporan penilaian
+    """
+    findings = []
+
+    # ── 1. HURUF GANDA TIDAK LAZIM ────────────────────────────────────────────
+    # Konsonan yang hampir tidak pernah ganda dalam bahasa Indonesia baku
+    # Kecuali: ss (massa, proses), ll (halal, dll, ullah), nn (sunnah, inn),
+    #          kk (Makkah), mm (immaterial, komma dari kata serapan)
+    # Vokal ganda juga sangat jarang: aa, ee, ii, oo, uu (kecuali "oo" di beberapa kata serapan)
+    DOUBLE_CONSONANT_RE = re.compile(
+        r'\b(\w*(?:aa|ee|ii|uu|bb|dd|ff|gg|hh|jj|pp|qq|rr|tt|vv|ww|yy|zz)\w*)\b',
+        re.IGNORECASE
+    )
+    # Kata yang memang sah mengandung huruf ganda (boleh diperluas)
+    VALID_DOUBLES = {
+        # tt
+        "watt", "watts", "nett", "netto", "brutto",
+        # gg
+        "eggnog",
+        # pp
+        "approval",
+        # ff
+        "office", "offline",
+        # Kata dengan vokal ganda yang sah dalam konteks laporan
+        "koordinasi", "kooperasi", "kooptasi", "koordi", "koord",
+        "maaf", "taati", "naas",   # aa valid
+        "ieee",                    # singkatan
+        # Angka/satuan romawi yang bisa muncul
+        "viii", "iii",
+    }
+    # Tambahan: kata yang diawali/diakhiri dengan huruf ganda karena awalan/akhiran
+    # misalnya "me-" + "ee-" tidak akan muncul di Indonesian
+    # Abaikan kata < 4 huruf (terlalu banyak false positive)
+    MIN_WORD_LEN = 5
+
+    double_hits = []
+    for m in DOUBLE_CONSONANT_RE.finditer(doc_text):
+        word = m.group(1)
+        word_lower = word.lower()
+        # Skip angka dan kata yang memang sah
+        if re.search(r'\d', word):
+            continue
+        if len(word) < MIN_WORD_LEN:
+            continue
+        if word_lower in VALID_DOUBLES:
+            continue
+        # Abaikan kata yang mengandung "oo" karena banyak serapan valid (koordinasi, dll)
+        if 'oo' in word_lower:
+            continue
+        # Ambil konteks
+        ctx_start = max(0, m.start() - 70)
+        ctx_end   = min(len(doc_text), m.end() + 70)
+        ctx = doc_text[ctx_start:ctx_end].replace('\n', ' ').strip()
+        double_hits.append({"word": word, "context": ctx})
+
+    # Dedup: 1 kata unik = 1 temuan (max 15 kata berbeda)
+    seen_words: dict = {}
+    for h in double_hits:
+        w = h["word"].lower()
+        if w not in seen_words:
+            seen_words[w] = h
+
+    if seen_words:
+        hits_str = "\n".join(
+            f'• "{h["word"]}" → ...{h["context"]}...'
+            for h in list(seen_words.values())[:12]
+        )
+        findings.append({
+            "id": "LT01",
+            "severity": "minor",
+            "category": "Typo — Huruf Ganda",
+            "title": f"Ditemukan {len(seen_words)} kata dengan huruf ganda tidak lazim",
+            "detail": (
+                f"Kata-kata berikut mengandung konsonan ganda yang sangat jarang "
+                f"(atau salah) dalam bahasa Indonesia baku. Periksa apakah ini typo:\n"
+                + hits_str
+            ),
+            "page_hint": "Seluruh dokumen",
+            "property": "",
+        })
+
+    # ── 2. POLA KATA TYPO YANG UMUM DI LAPORAN PENILAIAN ─────────────────────
+    # Daftar pasangan (pola_salah, koreksi, deskripsi)
+    COMMON_TYPOS = [
+        # Kata-kata yang sering salah ketik dalam laporan formal Indonesia
+        (r'\bberrdasarkan\b',     'berdasarkan',    'huruf "r" ganda'),
+        (r'\bberrdas\w+',         'berdasarkan',    'huruf "r" ganda'),
+        (r'\bdaalam\b',           'dalam',          'huruf "a" ganda'),
+        (r'\bdeengan\b',          'dengan',         'huruf "e" ganda'),
+        (r'\badaalah\b',          'adalah',         'huruf "a" ganda'),
+        (r'\bterrsebut\b',        'tersebut',       'huruf "r" ganda'),
+        (r'\bterrmasuk\b',        'termasuk',       'huruf "r" ganda'),
+        (r'\bmenngenai\b',        'mengenai',       'huruf "n" ganda'),
+        (r'\bperrtimbangan\b',    'pertimbangan',   'huruf "r" ganda'),
+        (r'\bpenilaiiaan\b',      'penilaian',      'huruf "i" & "a" ganda'),
+        (r'\bkeuanggaan\b',       'keuangan',       'huruf "g" ganda'),
+        (r'\bkeuangann\b',        'keuangan',       'huruf "n" ganda'),
+        (r'\bpemilkk?\b',         'pemilik',        'huruf "k" salah'),
+        (r'\bdiperlkukan\b',      'diperlukan',     'huruf hilang'),
+        (r'\bmenuruurut\b',       'menurut',        'huruf "u" berlebih'),
+        (r'\bperuusahaan\b',      'perusahaan',     'huruf "u" ganda'),
+        (r'\bperrseroan\b',       'perseroan',      'huruf "r" ganda'),
+        (r'\bnilaai\b',           'nilai',          'huruf "a" ganda'),
+        (r'\btahunm\b',           'tahun',          'huruf "m" berlebih'),
+        (r'\bPT\s{2,}',           'PT [nama]',      'spasi ganda setelah PT'),
+        (r'\b(\w{4,})\s+\1\b',    '[duplikasi kata]','kata yang sama berulang berturut-turut'),
+    ]
+
+    word_typo_hits = []
+    for pat, correction, reason in COMMON_TYPOS:
+        for m in re.finditer(pat, doc_text, re.IGNORECASE):
+            ctx_start = max(0, m.start() - 70)
+            ctx_end   = min(len(doc_text), m.end() + 70)
+            ctx = doc_text[ctx_start:ctx_end].replace('\n', ' ').strip()
+            word_typo_hits.append({
+                "word": m.group(),
+                "correction": correction,
+                "reason": reason,
+                "context": ctx,
+            })
+
+    if word_typo_hits:
+        hits_str = "\n".join(
+            f'• "{h["word"]}" → seharusnya "{h["correction"]}" ({h["reason"]})\n'
+            f'  Konteks: ...{h["context"]}...'
+            for h in word_typo_hits[:10]
+        )
+        findings.append({
+            "id": "LT02",
+            "severity": "minor",
+            "category": "Typo — Salah Ketik",
+            "title": f"Ditemukan {len(word_typo_hits)} kata yang kemungkinan salah ketik",
+            "detail": (
+                "Kata-kata berikut tampak salah ketik berdasarkan pola yang umum terjadi:\n"
+                + hits_str
+            ),
+            "page_hint": "Seluruh dokumen",
+            "property": "",
+        })
+
+    # ── 3. SPASI GANDA ─────────────────────────────────────────────────────
+    double_space_count = len(re.findall(r'[^\n] {2,}[^\n]', doc_text))
+    if double_space_count > 5:   # toleransi kecil untuk whitespace normal
+        findings.append({
+            "id": "LT03",
+            "severity": "minor",
+            "category": "Typo — Spasi Ganda",
+            "title": f"Ditemukan ±{double_space_count} lokasi spasi ganda",
+            "detail": (
+                f"Ada sekitar {double_space_count} tempat dalam dokumen yang mengandung "
+                "dua spasi atau lebih berturutan. Ini sering terjadi saat copy-paste "
+                "antar tabel/paragraf. Gunakan Find & Replace (  →  ) untuk membersihkan."
+            ),
+            "page_hint": "Seluruh dokumen",
+            "property": "",
+        })
+
+    return findings
+
+
 def cek_artefak_dan_placeholder(doc_text: str, mode_key: str) -> dict:
     """
     Deteksi lokal (tanpa AI) untuk:
     1. Artefak copy-paste (nama entitas asing)
     2. Placeholder belum diisi
     3. Penomoran ganda tabel/gambar
+    4. Typo (huruf ganda, salah ketik, spasi ganda)
     """
     findings = []
 
@@ -811,6 +1000,10 @@ def cek_artefak_dan_placeholder(doc_text: str, mode_key: str) -> dict:
             "page_hint": "Seluruh dokumen",
             "property": "",
         })
+
+    # ── CEK TYPO LOKAL ────────────────────────────────────────────────────────
+    typo_findings = cek_typo_lokal(doc_text)
+    findings.extend(typo_findings)
 
     return {
         "findings":   findings,
