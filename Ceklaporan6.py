@@ -1,24 +1,55 @@
+"""
+CekLaporan v7.0 — KJPP SRR
+Powered by Claude AI · Created by HW
+
+Peningkatan dari v6:
+- Upload & parsing lembar kerja XLSX (komparasi angka laporan vs workbook)
+- Artifact detector: deteksi teks copy-paste dari laporan lain
+- Placeholder detector: deteksi nilai "xx", tabel kosong, dll
+- Numbering checker: deteksi penomoran ganda tabel/gambar/sub-bab
+- Enhanced prompts: lebih spesifik dan mendalam untuk tiap mode
+- Download laporan review sebagai teks
+- pdfplumber untuk ekstraksi PDF lebih akurat
+"""
+
 import os
 import re
 import json
 import time
-import PyPDF2
+import io
 import anthropic
 import streamlit as st
 from docx import Document
 from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
+
+try:
+    import pdfplumber
+    PDF_ENGINE = "pdfplumber"
+except ImportError:
+    import PyPDF2
+    PDF_ENGINE = "PyPDF2"
+
+try:
+    import openpyxl
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
+
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
 
 # ──────────────────────────────────────────────
 # KONSTANTA
 # ──────────────────────────────────────────────
 MODEL      = "claude-sonnet-4-5"
 MAX_TOKENS = 8192
-MAX_CHARS  = 40000
+MAX_CHARS  = 45000   # dinaikkan dari 40000
 
-# Nama sheet di Google Spreadsheet
-SHEET_RIWAYAT  = "riwayat_audit"
+SHEET_RIWAYAT   = "riwayat_audit"
 SHEET_REFERENSI = "data_laporan"
 
 GSPREAD_SCOPES = [
@@ -26,13 +57,53 @@ GSPREAD_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Kata-kata yang mengindikasikan artefak copy-paste dari laporan lain
+ARTIFACT_KEYWORDS = [
+    # Nama entitas yang tidak seharusnya ada
+    "AMP", "SBPL", "MDK", "MDR", "TPIA",
+    "Petrosea Services Solutions",
+    "Singaraja Putra",  # hanya jika bukan obyek
+    # Frasa yang biasanya menandakan copy-paste
+    "pasar Singapura",
+    "peleburan nikel",
+    "nikel dan barang",
+]
+
+PLACEHOLDER_PATTERNS = [
+    r'\bRp\s+xx\b',
+    r'\bUSD?\s+xx\b',
+    r'\bRp\s*\.\s*\.\s*\.',
+    r'\bxxxx\b',
+    r'\b\[.*?diisi.*?\]',
+    r'\bTABEL\s*$',          # Tabel kosong
+    r'\bGambar\s*$',
+    r'(?<!\w)xx(?!\w)',
+    r'\bTBD\b',
+    r'\bN/A\b(?!\s*[\d,])',  # N/A bukan angka
+    r'\.{5,}',               # banyak titik beruntun (placeholder)
+]
+
+SEVERITY_CONFIG = {
+    "kritikal": {"emoji": "🔴", "color": "#c0392b", "bg": "#fff0f0"},
+    "minor":    {"emoji": "🟡", "color": "#d4860a", "bg": "#fff8e6"},
+    "ok":       {"emoji": "🟢", "color": "#1a9e67", "bg": "#edfaf4"},
+    "info":     {"emoji": "🔵", "color": "#1e6fbf", "bg": "#eef4ff"},
+    "mismatch": {"emoji": "🔶", "color": "#7c3aed", "bg": "#f5f3ff"},
+}
+
+# ──────────────────────────────────────────────
+# MODE CONFIG — instruksi untuk Claude
+# ──────────────────────────────────────────────
 MODE_CONFIG = {
     "🔍 Pre-Check": {
         "key": "precheck",
         "desc": "Pengecekan cepat ~30 detik. Fokus pada isu kritikal.",
         "instruction": (
             "Lakukan pengecekan cepat (Pre-Check). Fokus pada isu kritikal: "
-            "inkonsistensi nilai, tanggal, luas, dan alamat. Ringkas dalam 5-8 temuan utama."
+            "inkonsistensi nilai, tanggal, luas, dan alamat. Ringkas dalam 5-8 temuan utama. "
+            "Khusus perhatikan: (1) apakah ada nama entitas yang tidak relevan (artefak copy-paste), "
+            "(2) apakah ada nilai placeholder seperti 'Rp xx' atau tabel kosong, "
+            "(3) apakah nomor laporan konsisten di semua bagian."
         ),
     },
     "🧠 Deep Audit": {
@@ -41,7 +112,28 @@ MODE_CONFIG = {
         "instruction": (
             "Lakukan audit mendalam dan menyeluruh. Periksa setiap bagian laporan secara detail. "
             "Identifikasi semua inkonsistensi, kejanggalan naratif, kesalahan penulisan angka, "
-            "dan potensi kesalahan material."
+            "dan potensi kesalahan material.\n\n"
+
+            "=== DETEKSI KHUSUS (WAJIB LAKUKAN) ===\n"
+            "A. ARTEFAK COPY-PASTE: Cari teks yang tidak relevan dengan obyek laporan ini — "
+            "misalnya nama perusahaan lain, nama properti lain, atau paragraf tentang "
+            "industri/negara yang tidak terkait. Ini adalah kesalahan paling umum.\n\n"
+
+            "B. PLACEHOLDER BELUM DIISI: Cari nilai 'xx', 'Rp xx', 'USD xx', "
+            "tabel yang hanya berisi kata 'Tabel' tanpa data, titik-titik panjang "
+            "sebagai penanda nilai belum diisi, atau bagian yang tampak belum selesai ditulis.\n\n"
+
+            "C. PENOMORAN GANDA: Cek apakah ada nomor tabel, gambar, atau sub-bab yang muncul "
+            "dua kali (misalnya 'Gambar 4.8' muncul di dua halaman berbeda, atau sub-bab "
+            "bernomor '3.6.2' padahal seharusnya '3.7.1').\n\n"
+
+            "D. FOOTER/HEADER SALAH: Cek apakah footer atau header setiap bab sudah sesuai "
+            "dengan obyek laporan saat ini (bukan nama laporan lain).\n\n"
+
+            "E. DUPLIKASI TEKS: Cek paragraf yang diulang verbatim di beberapa bab — "
+            "pastikan isinya identik, tidak ada perbedaan kecil yang menyesatkan.\n\n"
+
+            "Berikan temuan SPESIFIK dengan menyebutkan bagian/halaman dan teks yang bermasalah."
         ),
     },
     "📐 KEPI/MAPPI": {
@@ -55,359 +147,267 @@ MODE_CONFIG = {
     },
     "🏢 Multi-Objek": {
         "key": "multiobj",
-        "desc": "Untuk laporan CBDK/PANI style dengan banyak properti.",
+        "desc": "Untuk laporan dengan banyak properti.",
         "instruction": (
             "Ini adalah laporan multi-objek/multi-properti. "
             "LANGKAH 1: Identifikasi terlebih dahulu berapa dan apa saja objek properti yang ada. "
-            "LANGKAH 2: Untuk SETIAP objek, cek konsistensi secara terpisah — "
-            "jangan campurkan data antar objek. "
-            "LANGKAH 3: Tandai temuan dengan nama objek yang relevan."
+            "LANGKAH 2: Untuk SETIAP objek, cek konsistensi secara terpisah. "
+            "LANGKAH 3: Tandai temuan dengan nama objek yang relevan. "
+            "LANGKAH 4: Cek secara khusus apakah ada data objek yang tercampur antar objek "
+            "(misalnya luas tanah objek A disebut di bagian objek B).\n\n"
+            "DETEKSI KHUSUS:\n"
+            "- Artefak copy-paste (nama entitas tidak relevan)\n"
+            "- Placeholder belum diisi (xx, tabel kosong)\n"
+            "- Penomoran ganda tabel/gambar"
         ),
     },
     "🏭 Penilaian Aset": {
         "key": "aset",
-        "desc": "Khusus laporan penilaian aset/properti (tanah, bangunan, mesin, kendaraan).",
+        "desc": "Laporan penilaian aset/properti (tanah, bangunan, mesin, kendaraan).",
         "instruction": (
-            "Ini adalah laporan PENILAIAN ASET/PROPERTI (dapat berupa pabrik, gedung, tanah, "
-            "atau kombinasi aset). Lakukan audit komprehensif dengan urutan berikut:\n\n"
+            "Ini adalah laporan PENILAIAN ASET/PROPERTI. Lakukan audit komprehensif:\n\n"
 
-            "=== BLOK 1: KONSISTENSI IDENTITAS LAPORAN ===\n"
-            "1. Konsistensi nama obyek penilaian: Nama properti/aset, nama pemilik/atas nama "
-            "(misal: PT Golden Harvest Cocoa Indonesia), dan lokasi lengkap (jalan, desa, "
-            "kecamatan, kabupaten, provinsi) harus SAMA PERSIS di: cover, surat pengantar, "
+            "=== BLOK 1: KONSISTENSI IDENTITAS ===\n"
+            "1. Nama obyek & pemilik harus SAMA PERSIS di cover, surat pengantar, "
             "ringkasan eksekutif, uraian umum, dan kesimpulan. "
-            "KHUSUS: Cek copy-paste nama perusahaan/properti dari laporan lain yang tidak "
-            "diganti — ini adalah kesalahan paling umum di laporan SRR.\n"
+            "KHUSUS: Cek copy-paste nama dari laporan lain.\n"
+            "2. Nomor laporan, tanggal penilaian, tanggal inspeksi, tanggal laporan "
+            "harus konsisten dan logis.\n"
+            "3. Identitas Pemberi Tugas & Pengguna Laporan harus sama di semua bagian.\n\n"
 
-            "2. Konsistensi nomor laporan dan tanggal: "
-            "Nomor laporan (format: NNNNN/2.0059-02/PI/04/XXXX/1/III/YYYY), tanggal "
-            "penerbitan laporan, tanggal penilaian (cut-off date), dan tanggal inspeksi lapangan "
-            "harus konsisten dan logis — tanggal inspeksi boleh setelah tanggal penilaian "
-            "tapi tanggal laporan harus setelah tanggal inspeksi.\n"
-
-            "3. Konsistensi identitas pemberi tugas & pengguna laporan: "
-            "Nama, alamat, dan deskripsi pemberi tugas harus sama di surat pengantar "
-            "vs ringkasan eksekutif vs uraian umum. Jika ada pengguna laporan tambahan "
-            "(misal bank konsorsium), pastikan disebutkan konsisten.\n"
-
-            "=== BLOK 2: KONSISTENSI LUAS & SPESIFIKASI FISIK ===\n"
-            "4. Konsistensi luas tanah: Luas tanah total (m²) yang disebutkan di surat pengantar, "
-            "ringkasan eksekutif, uraian umum, dan tabel penilaian harus sama. "
-            "Cek juga: jumlah sertifikat × luas per sertifikat = total luas tanah.\n"
-
-            "5. Konsistensi luas bangunan: Luas bangunan total (m²) harus sama di semua bagian. "
-            "Jika ada perincian per bangunan/blok, pastikan penjumlahan sesuai total.\n"
-
-            "6. Konsistensi jumlah & identitas sertifikat tanah: "
-            "Jumlah sertifikat (SHGB/SHM/SHGU) yang disebutkan di surat pengantar, "
-            "uraian umum, dan daftar data tanah (Bagian E.1) harus sama. "
-            "Cek nomor sertifikat, tanggal terbit, tanggal berakhir, dan luas per sertifikat.\n"
-
-            "7. Konsistensi spesifikasi mesin: Untuk laporan yang mencakup mesin-mesin, "
-            "cek konsistensi nama/tipe mesin, tahun pembuatan, negara asal, dan kapasitas "
-            "antara tabel ringkasan nilai (D.1) dengan uraian detail mesin (E.4). "
-            "Cek juga pemisahan mesin yang DIGUNAKAN vs BELUM DIGUNAKAN.\n"
-
-            "8. Konsistensi spesifikasi kendaraan: Cek nomor polisi, merk, tipe, tahun, "
-            "kondisi fisik, dan kondisi ekonomis antara tabel kendaraan dengan uraian detail.\n"
+            "=== BLOK 2: KONSISTENSI LUAS & FISIK ===\n"
+            "4. Luas tanah total harus sama di semua bagian. "
+            "Jumlah sertifikat × luas per sertifikat = total luas tanah.\n"
+            "5. Luas bangunan total & per bangunan/blok harus konsisten.\n"
+            "6. Jumlah & nomor sertifikat (SHGB/SHM/SHGU) harus sama.\n"
+            "7. Spesifikasi mesin (nama, tipe, tahun, kapasitas): tabel vs uraian.\n"
+            "8. Spesifikasi kendaraan (nopol, merk, tipe, tahun): tabel vs uraian.\n\n"
 
             "=== BLOK 3: KONSISTENSI NILAI ===\n"
-            "9. Konsistensi nilai kesimpulan: Nilai akhir penilaian (Rp dan USD) harus SAMA "
-            "PERSIS di: surat pengantar, resume penilaian/tabel ringkasan, ringkasan eksekutif "
-            "(Bab A), kesimpulan penilaian (Bab D.2). Cek juga terbilang sesuai angka.\n"
+            "9. Nilai akhir (Rp & USD) harus SAMA PERSIS di surat pengantar, "
+            "resume, ringkasan eksekutif, dan kesimpulan.\n"
+            "10. Nilai per komponen (tanah, bangunan, sarana, mesin, kendaraan) "
+            "di resume = tabel ringkasan = uraian detail.\n"
+            "11. Konversi kurs: Rp ÷ kurs BI = USD. Kurs harus sama di semua bagian.\n"
+            "12. BPB × (1 - penyusutan%) = nilai pasar per komponen.\n\n"
 
-            "10. Konsistensi nilai per komponen: Nilai masing-masing komponen (tanah, bangunan, "
-            "sarana pelengkap, mesin digunakan, mesin belum digunakan, kendaraan) di resume "
-            "penilaian harus sama dengan yang ada di tabel ringkasan Bab D.1 dan uraian "
-            "detail Bab E. Rumus: Total = Tanah + Bangunan + Sarana + Mesin + Kendaraan.\n"
+            "=== BLOK 4: KESESUAIAN STANDAR ===\n"
+            "13. Pendekatan per komponen: tanah→pasar, bangunan/sarana→biaya, "
+            "mesin→biaya, kendaraan→pasar. Konsisten antara narasi dan tabel.\n"
+            "14. Elemen wajib KEPI & SPI: pernyataan penilai, asumsi, tujuan, "
+            "definisi nilai, tanggal penilaian, pendekatan, data yang digunakan, "
+            "kejadian penting setelah tanggal penilaian.\n\n"
 
-            "11. Konsistensi konversi kurs USD: Nilai Rupiah ÷ kurs BI = nilai USD. "
-            "Kurs BI harus sama di semua bagian laporan (biasanya di uraian umum/Bab B). "
-            "Cek konversi per komponen dan total.\n"
-
-            "12. Konsistensi BPB dan penyusutan: Biaya Pengganti Baru (BPB) dikurangi "
-            "penyusutan (%) harus menghasilkan nilai pasar yang tercantum di tabel. "
-            "Verifikasi: Nilai Pasar = BPB × (1 - Penyusutan%).\n"
-
-            "=== BLOK 4: KONSISTENSI PENDEKATAN & METODE ===\n"
-            "13. Konsistensi pendekatan penilaian per komponen: "
-            "Untuk laporan aset kompleks (pabrik): tanah → pendekatan pasar, "
-            "bangunan & sarana pelengkap → pendekatan biaya, "
-            "mesin-mesin → pendekatan biaya (metode indeks biaya), "
-            "kendaraan → pendekatan pasar. "
-            "Pastikan penerapan metode ini konsisten antara penjelasan di Bab B/C "
-            "dengan yang diterapkan di Bab D/E.\n"
-
-            "14. Konsistensi penggunaan tertinggi dan terbaik (HBU): "
-            "Jika disebut di ringkasan eksekutif, pastikan konsisten dengan analisis di uraian.\n"
-
-            "=== BLOK 5: KESESUAIAN STANDAR KEPI & SPI ===\n"
-            "15. Elemen wajib laporan penilaian aset sesuai KEPI & SPI: Cek keberadaan: "
-            "(a) pernyataan penilai (signing partner, reviewer, tim penilai), "
-            "(b) asumsi-asumsi dan kondisi pembatas, "
-            "(c) tujuan dan maksud penilaian, "
-            "(d) definisi nilai yang digunakan, "
-            "(e) tanggal penilaian dan tanggal inspeksi, "
-            "(f) pendekatan dan prosedur penilaian, "
-            "(g) data dan informasi yang digunakan, "
-            "(h) kejadian penting setelah tanggal penilaian.\n"
-
-            "16. Konsistensi IMB/dokumen perizinan: Jika ada nomor IMB atau izin lain, "
-            "pastikan nomor dan tanggalnya konsisten antara surat pengantar dan uraian.\n"
-
-            "=== BLOK 6: TYPO & INKONSISTENSI PENULISAN ===\n"
-            "17. Typo nama perusahaan/properti: Cek ejaan nama pemilik dan obyek penilaian "
-            "konsisten di seluruh dokumen (misalnya 'PT Golden Harvest Cocoa Indonesia' "
-            "tidak boleh muncul sebagai nama lain di bagian manapun).\n"
-
-            "18. Konsistensi format angka: Format penulisan nilai harus konsisten "
-            "(misal: Rp 2.593.463.082.000,00 vs Rp2.593.463.082.000 — pilih satu format). "
-            "Cek juga konsistensi satuan (Rp Ribu vs Rp 000,00 vs US$ ,00).\n"
-
-            "19. Konsistensi terbilang: Nilai terbilang (huruf) harus sesuai dengan angka. "
-            "Cek di surat pengantar dan kesimpulan penilaian.\n"
-
-            "20. Konsistensi paragraf berulang: Beberapa bagian laporan (obyek penilaian, "
-            "tujuan penilaian, dll) muncul di beberapa bab. Pastikan teksnya IDENTIK.\n"
-
-            "Berikan temuan SPESIFIK dengan menyebutkan bagian/halaman dan "
-            "nilai/teks yang tidak konsisten. Prioritaskan temuan yang mempengaruhi "
-            "validitas dan nilai penilaian."
+            "=== BLOK 5: DETEKSI KHUSUS ===\n"
+            "15. Artefak copy-paste: nama perusahaan/properti dari laporan lain.\n"
+            "16. Placeholder: nilai 'xx', tabel kosong, '...' sebagai pengganti angka.\n"
+            "17. Penomoran ganda: tabel atau gambar yang nomornya dipakai dua kali.\n"
+            "18. Footer/header salah: menyebut nama laporan/obyek lain.\n"
+            "19. Terbilang (huruf) harus sesuai angka di surat pengantar & kesimpulan.\n"
+            "20. Format angka konsisten (Rp Ribu vs Rp 000,00 vs US$ ,00)."
         ),
     },
     "📈 Penilaian Saham": {
         "key": "saham",
-        "desc": "Khusus laporan penilaian saham (Business Valuation) sesuai POJK 35/2020.",
+        "desc": "Laporan penilaian saham (Business Valuation) sesuai POJK 35/2020.",
         "instruction": (
-            "Ini adalah laporan PENILAIAN SAHAM (Business Valuation). Lakukan audit komprehensif "
-            "dengan fokus pada hal-hal berikut secara berurutan:\n\n"
+            "Ini adalah laporan PENILAIAN SAHAM (Business Valuation). "
+            "Lakukan audit komprehensif dengan SANGAT DETAIL:\n\n"
 
-            "=== BLOK 1: KONSISTENSI IDENTITAS LAPORAN ===\n"
-            "1. Konsistensi nama obyek penilaian: Pastikan nama perusahaan yang dinilai "
-            "(misalnya 'PT Chandra Capital Indonesia' atau 'CCI') dan persentase saham "
-            "(misalnya '99,99%') KONSISTEN di seluruh bagian laporan — cover, surat pengantar, "
-            "ringkasan eksekutif, deskripsi penugasan, kesimpulan. "
-            "KHUSUS: Cek apakah ada bagian yang menyebut nama perusahaan/saham LAIN yang tidak "
-            "relevan (misalnya nama perusahaan dari laporan lain seperti 'MDK', 'MDR', 'TPIA', "
-            "atau kode ticker lain) karena ini adalah kesalahan copy-paste yang sangat umum.\n"
-
-            "2. Konsistensi nama Pemberi Tugas dan Pengguna Laporan: "
-            "Nama, alamat, bidang usaha, nomor telepon, email, dan website harus sama persis "
-            "di semua bagian (surat pengantar vs ringkasan eksekutif vs deskripsi penugasan).\n"
-
-            "3. Konsistensi nomor laporan dan tanggal: "
-            "Nomor laporan (misal: 00181/2.0059-02/BS/04/0242/1/IV/2026), tanggal penerbitan "
-            "(16 April 2026), dan tanggal penilaian (31 Desember 2025) harus sama di semua bagian.\n"
+            "=== BLOK 1: IDENTITAS & KONSISTENSI NAMA ===\n"
+            "1. Nama perusahaan yang dinilai dan persentase saham "
+            "(misalnya '99,995%') harus KONSISTEN di: cover, surat pengantar, "
+            "ringkasan eksekutif, deskripsi penugasan, profil perusahaan, dan kesimpulan. "
+            "KHUSUS: Cek apakah ada nama perusahaan/saham LAIN yang tidak relevan "
+            "(artefak copy-paste dari laporan lain — ini kesalahan paling umum).\n"
+            "2. Nama & singkatan perusahaan yang dinilai: pastikan definisi akronim "
+            "muncul saat pertama kali disebut, lalu konsisten digunakan.\n"
+            "3. Nama Pemberi Tugas dan Pengguna Laporan: nama, alamat, bidang usaha, "
+            "nomor telepon, email, website harus SAMA PERSIS di semua bagian.\n"
+            "4. Nomor laporan dan tanggal: nomor laporan, tanggal penerbitan, "
+            "dan tanggal penilaian harus sama di semua bagian.\n\n"
 
             "=== BLOK 2: KONSISTENSI NILAI ===\n"
-            "4. Nilai kesimpulan: Nilai akhir penilaian (dalam USD dan setara Rupiah) harus "
-            "SAMA PERSIS di: surat pengantar, ringkasan eksekutif (Bab 1), dan kesimpulan (Bab 7). "
-            "Cek juga konversi kurs: nilai USD x kurs BI harus sama dengan nilai Rupiah yang disebut.\n"
-
-            "5. Konsistensi angka keuangan: Angka-angka di laporan posisi keuangan (Tabel 3.2), "
-            "laporan laba rugi (Tabel 3.3), dan tabel penilaian (Tabel 1.1 / Tabel 7.1) harus "
-            "konsisten satu sama lain. Khusus cek: Total Aset = Total Liabilitas + Ekuitas.\n"
-
-            "6. Aset non-operasional vs operasional: Pastikan pemisahan aset operasional dan "
-            "non-operasional konsisten antara narasi dan tabel. "
-            "Cek angka: Nilai 100% ekuitas = Indikasi nilai operasional + Aset non-operasional.\n"
-
-            "7. Diskon likuiditas pasar: Jika diskon tidak diterapkan, pastikan alasannya "
-            "konsisten antara narasi Bab 1, Bab 7, dan tabel (nilai negatif sebelum diskon = "
-            "alasan tidak diterapkan).\n"
+            "5. Nilai kesimpulan penilaian harus SAMA PERSIS di: surat pengantar, "
+            "ringkasan eksekutif (Bab 1), dan kesimpulan (Bab terakhir). "
+            "Cek konversi kurs: nilai USD × kurs BI = nilai Rupiah.\n"
+            "6. Angka laporan posisi keuangan: Total Aset = Total Liabilitas + Ekuitas "
+            "di setiap tahun yang disajikan. Cek juga konsistensi antara tabel dan narasi.\n"
+            "7. Aset non-operasional vs operasional: pemisahan konsisten antara "
+            "narasi dan tabel. Cek: Nilai 100% ekuitas = Indikasi operasional + Aset non-op.\n"
+            "8. Diskon likuiditas pasar: jika diterapkan, pastikan besaran (%) konsisten "
+            "antara narasi Bab 1, tabel, dan kesimpulan. Jika tidak diterapkan, "
+            "pastikan alasannya konsisten.\n"
+            "9. Perhitungan 99,99x%: nilai 99,99x% saham = nilai 100% × 99,99x%. "
+            "Cek apakah perhitungan ini konsisten.\n\n"
 
             "=== BLOK 3: KONSISTENSI METODE & PENDEKATAN ===\n"
-            "8. Nama pendekatan & metode: Pastikan konsisten di cover letter, Bab 1 (bagian 1.7), "
-            "Bab 6, dan Bab 7. "
-            "KHUSUS: Cek apakah ada bagian yang menyebut pendekatan/metode untuk perusahaan LAIN "
-            "(misal 'pendekatan pasar untuk perusahaan tambang nikel') yang tidak relevan dengan "
-            "obyek penilaian saat ini — ini adalah kesalahan copy-paste yang sangat umum.\n"
+            "10. Nama pendekatan & metode harus konsisten di cover letter, Bab 1, "
+            "Bab Pendekatan, dan Bab Kesimpulan. "
+            "KHUSUS: Cek apakah ada metode/pendekatan untuk perusahaan LAIN "
+            "(artefak copy-paste — sangat umum).\n"
+            "11. Alasan tidak menggunakan metode lain harus mengacu pada "
+            "karakteristik obyek yang benar.\n\n"
 
-            "9. Alasan pemilihan metode: Alasan tidak menggunakan metode lain (DCF, market approach) "
-            "harus mengacu pada obyek yang benar dan konsisten dengan karakteristik perusahaan.\n"
-
-            "=== BLOK 4: KESESUAIAN STANDAR POJK 35/2020 & KEPI/SPI ===\n"
-            "10. Elemen wajib POJK 35/2020: Cek keberadaan: (a) status penilai dan STTD OJK, "
-            "(b) tujuan dan maksud penilaian, (c) tanggal efektif penilaian, (d) dasar nilai, "
-            "(e) premis penilaian, (f) kondisi pembatas, (g) asumsi dan asumsi khusus, "
-            "(h) pernyataan independensi penilai, (i) pernyataan penilai, "
-            "(j) kejadian setelah tanggal penilaian.\n"
-
-            "11. Konsistensi premis penilaian: Pastikan premis 'going concern' atau 'likuidasi' "
-            "konsisten antara pernyataan dan metode yang dipilih.\n"
+            "=== BLOK 4: KESESUAIAN POJK 35/2020 & KEPI/SPI ===\n"
+            "12. Elemen wajib POJK 35/2020: (a) status penilai & STTD OJK, "
+            "(b) tujuan & maksud penilaian, (c) tanggal efektif penilaian, "
+            "(d) dasar nilai, (e) premis penilaian, (f) kondisi pembatas, "
+            "(g) asumsi & asumsi khusus, (h) pernyataan independensi, "
+            "(i) pernyataan penilai, (j) kejadian setelah tanggal penilaian.\n"
+            "13. Premis 'going concern' atau 'likuidasi' harus konsisten "
+            "antara pernyataan dan metode yang dipilih.\n\n"
 
             "=== BLOK 5: TYPO & INKONSISTENSI PENULISAN ===\n"
-            "12. Typo nama perusahaan: Cek ejaan nama perusahaan (PT Chandra Capital Indonesia, "
-            "PT Chandra Asri Pacific, PT Chandra Asri Perkasa, dll) konsisten di seluruh dokumen.\n"
+            "14. Typo nama perusahaan: ejaan harus konsisten di seluruh dokumen.\n"
+            "15. Akronim/singkatan: setiap akronim yang didefinisikan harus "
+            "digunakan konsisten setelahnya.\n"
+            "16. Paragraf berulang: laporan sering mengulang teks di beberapa bab "
+            "(latar belakang, deskripsi penugasan, dll). Pastikan IDENTIK.\n"
+            "17. Format angka: konsisten (USD ribu / Rp juta / Rp miliar).\n"
+            "18. 'batu bara' vs 'batubara', 'Jl.' vs 'Jalan' — pilih satu format.\n\n"
 
-            "13. Konsistensi akronim/singkatan: Setiap akronim yang didefinisikan di Daftar Istilah "
-            "harus digunakan secara konsisten. Cek apakah ada bagian yang masih menggunakan nama "
-            "lengkap setelah akronim didefinisikan, atau sebaliknya menggunakan akronim sebelum "
-            "didefinisikan.\n"
+            "=== BLOK 6: DETEKSI KHUSUS ===\n"
+            "19. Artefak copy-paste: cari nama entitas/paragraf dari laporan lain "
+            "yang tidak relevan (misalnya 'AMP', 'SBPL', 'PSS', dll).\n"
+            "20. Placeholder belum diisi: 'Rp xx juta', tabel dengan hanya kata 'Tabel', "
+            "nilai '...' sebagai pengganti angka.\n"
+            "21. Penomoran ganda: tabel atau gambar dengan nomor yang sama di dua tempat.\n"
+            "22. Footer/header salah: bab dengan footer nama laporan lain.\n"
+            "23. Alamat yang disebut dua kali berturut-turut tanpa pemisah yang jelas.\n\n"
 
-            "14. Konsistensi kalimat yang berulang: Laporan penilaian sering memiliki paragraf "
-            "yang diulang di beberapa bab (misalnya latar belakang, deskripsi penugasan). "
-            "Pastikan semua paragraf berulang itu IDENTIK dan tidak ada perbedaan kecil yang "
-            "menyesatkan.\n"
-
-            "15. Format angka: Pastikan format penulisan angka konsisten "
-            "(misalnya US$ 659 ribu vs USD 659.000 vs Rp 11.067 juta — pilih satu format).\n"
-
-            "Berikan temuan yang SPESIFIK dengan menyebutkan halaman/bab/bagian yang bermasalah "
-            "dan nilai/kata yang tidak konsisten."
+            "Berikan temuan SPESIFIK dengan menyebutkan halaman/bab dan "
+            "nilai/kata yang tidak konsisten. Prioritaskan temuan yang mempengaruhi "
+            "validitas penilaian."
         ),
     },
     "⚖️ Pendapat Kewajaran": {
         "key": "fairness",
-        "desc": "Khusus laporan pendapat kewajaran (Fairness Opinion) atas transaksi.",
+        "desc": "Laporan pendapat kewajaran (Fairness Opinion) atas transaksi.",
         "instruction": (
-            "Ini adalah laporan PENDAPAT KEWAJARAN (Fairness Opinion). Lakukan audit komprehensif "
-            "dengan fokus pada hal-hal berikut:\n\n"
+            "Ini adalah laporan PENDAPAT KEWAJARAN (Fairness Opinion). "
+            "Lakukan audit komprehensif:\n\n"
 
             "=== BLOK 1: KONSISTENSI IDENTITAS TRANSAKSI ===\n"
-            "1. Konsistensi nama transaksi: Nama rencana transaksi (misalnya 'Rencana Transaksi', "
-            "'Rencana Akuisisi', 'Rencana Pengalihan Saham') harus KONSISTEN di seluruh laporan — "
-            "cover, surat pengantar, ringkasan eksekutif, analisis, dan kesimpulan.\n"
+            "1. Nama rencana transaksi harus KONSISTEN di seluruh laporan.\n"
+            "2. Nama penjual, pembeli, dan obyek transaksi harus SAMA PERSIS. "
+            "KHUSUS: Cek copy-paste nama dari laporan lain.\n"
+            "3. Nilai transaksi (harga per saham, total) harus sama di semua bagian "
+            "dan konsisten dengan hasil penilaian.\n\n"
 
-            "2. Konsistensi pihak-pihak transaksi: Nama penjual, pembeli, dan obyek transaksi "
-            "harus SAMA PERSIS di semua bagian. "
-            "KHUSUS: Cek apakah ada copy-paste nama dari laporan lain yang tidak relevan.\n"
+            "=== BLOK 2: KONSISTENSI ANALISIS ===\n"
+            "4. Kewajaran finansial: analisis konsisten antara narasi dan kesimpulan.\n"
+            "5. Kewajaran non-finansial: konsisten antara analisis dan kesimpulan.\n"
+            "6. Referensi ke laporan penilaian: nilai yang dikutip harus sama.\n\n"
 
-            "3. Konsistensi nilai transaksi: Nilai transaksi yang disebutkan (harga per saham, "
-            "total nilai transaksi) harus sama di semua bagian dan konsisten dengan hasil penilaian.\n"
+            "=== BLOK 3: KESESUAIAN STANDAR ===\n"
+            "7. Elemen wajib Pendapat Kewajaran POJK 35/2020: identitas peminta, "
+            "deskripsi transaksi, analisis kewajaran finansial & non-finansial, "
+            "kesimpulan, pernyataan independensi, kondisi pembatas.\n"
+            "8. Pengungkapan afiliasi jika transaksi dengan pihak terafiliasi.\n\n"
 
-            "=== BLOK 2: KONSISTENSI ANALISIS KEWAJARAN ===\n"
-            "4. Kewajaran dari sisi keuangan: Pastikan analisis kewajaran finansial konsisten "
-            "antara narasi dan kesimpulan — apakah transaksi dinyatakan 'wajar' atau 'tidak wajar'.\n"
-
-            "5. Kewajaran dari sisi non-keuangan: Pastikan analisis manfaat strategis, risiko, "
-            "dan kondisi pasar konsisten antara analisis dan kesimpulan.\n"
-
-            "6. Referensi silang dengan laporan penilaian: Jika ada laporan penilaian yang "
-            "direferensikan, pastikan nilai yang dikutip sama dengan laporan penilaian aslinya.\n"
-
-            "=== BLOK 3: KESESUAIAN STANDAR POJK & KEPI/SPI ===\n"
-            "7. Elemen wajib Pendapat Kewajaran sesuai POJK 35/2020: Cek keberadaan: "
-            "(a) identitas pihak yang meminta pendapat kewajaran, "
-            "(b) deskripsi rencana transaksi, "
-            "(c) analisis kewajaran dari sisi keuangan, "
-            "(d) analisis kewajaran dari sisi non-keuangan, "
-            "(e) kesimpulan kewajaran, "
-            "(f) pernyataan independensi penilai, "
-            "(g) kondisi pembatas dan asumsi.\n"
-
-            "8. Transaksi afiliasi: Jika ini transaksi dengan pihak terafiliasi, pastikan "
-            "pengungkapan hubungan afiliasi sudah lengkap dan memadai.\n"
-
-            "=== BLOK 4: TYPO & INKONSISTENSI ===\n"
-            "9. Typo dan inkonsistensi penulisan: Cek ejaan nama perusahaan, nama orang, "
-            "tanggal, angka, dan akronim di seluruh dokumen.\n"
-
-            "10. Konsistensi kalimat berulang: Cek paragraf yang muncul di beberapa bagian "
-            "dan pastikan isinya identik.\n"
-
-            "Berikan temuan SPESIFIK dengan menyebutkan halaman/bagian dan nilai/kata yang "
-            "tidak konsisten. Prioritaskan temuan yang berdampak pada validitas pendapat kewajaran."
+            "=== BLOK 4: DETEKSI KHUSUS ===\n"
+            "9. Artefak copy-paste, placeholder, penomoran ganda, footer salah.\n"
+            "10. Konsistensi paragraf berulang, format angka, akronim."
         ),
     },
 }
 
-# Item cek untuk laporan properti (default)
-CHECK_ITEMS_PROPERTI = [
+# Check items per mode
+CHECK_ITEMS_DEFAULT = [
     "Konsistensi Tanggal (inspeksi, penilaian, laporan)",
     "Konsistensi Luas (tanah, bangunan, GFA, NLA)",
     "Konsistensi Alamat & Lokasi",
     "Konsistensi Nilai (angka vs huruf, ringkasan vs kesimpulan)",
     "Kepemilikan & Nomor Sertifikat",
-    "Koreksi & Konsistensi NJOP",
     "Kesesuaian Standar KEPI/MAPPI",
     "Analisis Pasar & Data Pembanding",
     "Pendekatan & Metode Penilaian",
     "Kelengkapan Narasi & Deskripsi Objek",
+    "Deteksi Artefak Copy-Paste",
+    "Deteksi Placeholder Belum Diisi",
+    "Konsistensi Penomoran Tabel/Gambar/Sub-bab",
 ]
 
-# Item cek khusus laporan penilaian saham
 CHECK_ITEMS_SAHAM = [
-    "Konsistensi nama perusahaan yang dinilai di seluruh laporan",
-    "Konsistensi persentase saham yang dinilai (misal 99,99%)",
-    "Typo/copy-paste nama perusahaan lain yang tidak relevan",
-    "Konsistensi nilai penilaian (USD & Rupiah) di semua bagian",
-    "Konsistensi konversi kurs BI (nilai USD x kurs = nilai Rupiah)",
-    "Konsistensi angka laporan posisi keuangan (Aset = Liabilitas + Ekuitas)",
-    "Konsistensi pemisahan aset operasional vs non-operasional",
-    "Konsistensi diskon likuiditas pasar (diterapkan/tidak + alasan)",
-    "Konsistensi nama Pemberi Tugas dan Pengguna Laporan",
-    "Konsistensi tanggal penilaian dan tanggal penerbitan laporan",
-    "Konsistensi nomor laporan di semua bagian",
-    "Konsistensi pendekatan & metode penilaian di semua bab",
-    "Copy-paste metode/pendekatan dari laporan lain yang tidak relevan",
+    "Konsistensi nama & persentase saham di seluruh laporan",
+    "Deteksi nama entitas/artefak copy-paste dari laporan lain",
+    "Nilai kesimpulan konsisten di surat pengantar, ringkasan, dan kesimpulan",
+    "Konversi kurs BI (nilai USD × kurs = nilai Rupiah)",
+    "Angka LK: Total Aset = Total Liabilitas + Ekuitas",
+    "Konsistensi aset operasional vs non-operasional",
+    "Konsistensi diskon likuiditas pasar",
+    "Konsistensi Pemberi Tugas & Pengguna Laporan",
+    "Konsistensi nomor laporan & tanggal penilaian",
+    "Konsistensi pendekatan & metode di semua bab",
     "Kelengkapan elemen wajib POJK 35/2020",
-    "Konsistensi akronim dan singkatan perusahaan",
+    "Konsistensi akronim & singkatan",
     "Konsistensi paragraf berulang antar bab",
-    "Format penulisan angka konsisten (USD ribu / Rp juta)",
+    "Format angka konsisten (USD ribu / Rp juta)",
+    "Deteksi placeholder belum diisi (Rp xx, tabel kosong)",
+    "Deteksi penomoran ganda tabel/gambar",
+    "Deteksi footer/header mengacu laporan lain",
+    "Konsistensi ejaan 'batu bara' vs 'batubara'",
 ]
 
-# Item cek khusus laporan pendapat kewajaran
-CHECK_ITEMS_FAIRNESS = [
-    "Konsistensi nama dan deskripsi rencana transaksi",
-    "Konsistensi nama pihak-pihak yang terlibat transaksi",
-    "Typo/copy-paste nama perusahaan/transaksi lain yang tidak relevan",
-    "Konsistensi nilai transaksi di semua bagian",
-    "Referensi silang dengan nilai laporan penilaian yang dirujuk",
-    "Konsistensi kesimpulan kewajaran (wajar/tidak wajar)",
-    "Konsistensi analisis kewajaran keuangan dan non-keuangan",
-    "Kelengkapan elemen wajib Pendapat Kewajaran POJK 35/2020",
-    "Pengungkapan hubungan afiliasi (jika transaksi dengan pihak terafiliasi)",
-    "Konsistensi tanggal penilaian, tanggal laporan, tanggal transaksi",
-    "Konsistensi identitas Pemberi Tugas dan Pengguna Laporan",
-    "Konsistensi akronim dan singkatan",
-    "Konsistensi paragraf berulang antar bab",
-    "Format penulisan angka konsisten",
-]
-
-# Item cek khusus laporan penilaian aset/properti (pabrik, gedung, tanah, mesin)
 CHECK_ITEMS_ASET = [
-    "Konsistensi nama obyek penilaian & pemilik di seluruh laporan",
-    "Copy-paste nama perusahaan/properti dari laporan lain yang tidak diganti",
-    "Konsistensi nomor laporan, tanggal penilaian, tanggal inspeksi, tanggal laporan",
-    "Konsistensi identitas Pemberi Tugas & Pengguna Laporan",
-    "Konsistensi luas tanah total & per sertifikat (jumlah SHGB × luas = total)",
-    "Konsistensi luas bangunan total & per bangunan/blok",
-    "Konsistensi nomor, tanggal terbit, tanggal berakhir & luas sertifikat tanah",
-    "Konsistensi nilai kesimpulan (Rp & USD) di semua bagian laporan",
-    "Konsistensi nilai per komponen (tanah, bangunan, sarana, mesin, kendaraan)",
-    "Konsistensi konversi kurs BI (Rp ÷ kurs = USD, kurs sama di semua bagian)",
-    "Verifikasi BPB × (1 - penyusutan%) = nilai pasar per komponen",
-    "Konsistensi pemisahan mesin DIGUNAKAN vs BELUM DIGUNAKAN",
-    "Konsistensi spesifikasi mesin (nama, tipe, tahun, kapasitas) tabel vs uraian",
-    "Konsistensi spesifikasi kendaraan (nopol, merk, tipe, tahun) tabel vs uraian",
-    "Konsistensi pendekatan penilaian per komponen (pasar/biaya/pendapatan)",
-    "Konsistensi terbilang (huruf) sesuai angka di surat pengantar & kesimpulan",
-    "Kelengkapan elemen wajib KEPI & SPI (pernyataan penilai, asumsi, dst)",
-    "Konsistensi format penulisan angka dan satuan (Rp Ribu, US$, m²)",
-    "Konsistensi paragraf berulang antar bab (obyek penilaian, tujuan, dll)",
-    "Konsistensi nomor IMB/perizinan jika ada",
+    "Konsistensi nama obyek penilaian & pemilik",
+    "Deteksi copy-paste nama dari laporan lain",
+    "Konsistensi nomor laporan, tanggal penilaian, inspeksi, dan terbit",
+    "Konsistensi Pemberi Tugas & Pengguna Laporan",
+    "Konsistensi luas tanah total & per sertifikat",
+    "Konsistensi luas bangunan total & per bangunan",
+    "Konsistensi nomor, tanggal terbit/berakhir sertifikat",
+    "Nilai kesimpulan (Rp & USD) konsisten di semua bagian",
+    "Nilai per komponen konsisten (tanah, bangunan, sarana, mesin, kendaraan)",
+    "Konversi kurs BI (Rp ÷ kurs = USD)",
+    "Verifikasi BPB × (1 - penyusutan%) = nilai pasar",
+    "Pemisahan mesin DIGUNAKAN vs BELUM DIGUNAKAN",
+    "Spesifikasi mesin (nama, tipe, tahun, kapasitas) tabel vs uraian",
+    "Spesifikasi kendaraan (nopol, merk, tipe, tahun) tabel vs uraian",
+    "Pendekatan penilaian per komponen (pasar/biaya/pendapatan)",
+    "Terbilang (huruf) sesuai angka",
+    "Kelengkapan elemen wajib KEPI & SPI",
+    "Deteksi placeholder belum diisi",
+    "Deteksi penomoran ganda tabel/gambar/sub-bab",
+    "Deteksi footer/header mengacu laporan lain",
 ]
 
-CHECK_ITEMS_DEFAULT = CHECK_ITEMS_PROPERTI  # Fallback default
+CHECK_ITEMS_FAIRNESS = [
+    "Konsistensi nama & deskripsi rencana transaksi",
+    "Konsistensi nama pihak-pihak transaksi",
+    "Deteksi copy-paste dari laporan lain",
+    "Konsistensi nilai transaksi",
+    "Referensi silang dengan laporan penilaian yang dirujuk",
+    "Konsistensi kesimpulan kewajaran",
+    "Kelengkapan elemen wajib POJK 35/2020",
+    "Pengungkapan hubungan afiliasi",
+    "Konsistensi tanggal",
+    "Deteksi placeholder & penomoran ganda",
+]
 
-SEVERITY_CONFIG = {
-    "kritikal": {"emoji": "🔴", "color": "#c0392b", "bg": "#fff0f0"},
-    "minor":    {"emoji": "🟡", "color": "#d4860a", "bg": "#fff8e6"},
-    "ok":       {"emoji": "🟢", "color": "#1a9e67", "bg": "#edfaf4"},
-    "info":     {"emoji": "🔵", "color": "#1e6fbf", "bg": "#eef4ff"},
-}
-
+# ──────────────────────────────────────────────
+# SYSTEM PROMPT
+# ──────────────────────────────────────────────
 SYSTEM_PROMPT = """Kamu adalah expert QA auditor laporan penilaian di Indonesia.
-Kamu memahami standar KEPI, MAPPI, dan SPI (Standar Penilaian Indonesia) dengan sangat baik. Kamu juga memahami POJK 35/2020 tentang Penilaian dan Penyajian Laporan Penilaian Bisnis di Pasar Modal, termasuk seluk-beluk laporan penilaian saham (business valuation) dan pendapat kewajaran (fairness opinion). Kamu paham bahwa kesalahan paling umum dalam laporan penilaian saham adalah: (1) copy-paste nama perusahaan/obyek dari laporan lain yang tidak diganti, (2) inkonsistensi nilai antara surat pengantar, ringkasan eksekutif, dan kesimpulan, (3) inkonsistensi angka keuangan antara tabel dan narasi, (4) kesalahan konversi kurs, dan (5) penggunaan pendekatan/metode yang tidak sesuai atau tidak konsisten.
-Tugasmu menganalisis laporan penilaian dan menemukan inkonsistensi, kesalahan, atau ketidaksesuaian standar.
+Kamu memahami standar KEPI, MAPPI, SPI (Standar Penilaian Indonesia), dan POJK 35/2020 dengan sangat baik.
+
+KESALAHAN PALING UMUM yang wajib kamu deteksi:
+1. ARTEFAK COPY-PASTE: nama perusahaan/properti/entitas dari laporan lain yang tidak diganti.
+   Contoh: laporan tentang KMS tapi ada paragraf menyebut "AMP", "SBPL", "PSS Pte Ltd", dll.
+2. PLACEHOLDER BELUM DIISI: "Rp xx juta", tabel yang hanya berisi kata "Tabel", nilai "..."
+   sebagai pengganti angka, bagian yang tampak belum selesai ditulis.
+3. PENOMORAN GANDA: "Gambar 4.8" muncul dua kali, sub-bab bernomor "3.6.2" tapi seharusnya "3.7.1".
+4. FOOTER/HEADER SALAH: bab dengan footer nama laporan atau obyek yang berbeda.
+5. INKONSISTENSI NILAI: angka yang sama disebut berbeda di bagian yang berbeda.
+6. INKONSISTENSI NAMA: nama perusahaan/obyek penilaian berbeda ejaan di bagian berbeda.
 
 SELALU berikan output HANYA dalam format JSON yang valid, tanpa teks apapun di luar JSON.
 Gunakan struktur PERSIS berikut:
 
 {
-  "report_type": "tunggal atau multi-objek",
-  "properties": ["nama/deskripsi properti 1", "nama/deskripsi properti 2"],
+  "report_type": "deskripsi singkat jenis laporan",
+  "properties": ["nama/deskripsi entitas utama"],
   "summary": {
     "total_findings": 0,
     "kritikal": 0,
@@ -421,22 +421,403 @@ Gunakan struktur PERSIS berikut:
     {
       "id": "F001",
       "severity": "kritikal",
-      "category": "Nilai",
+      "category": "Artefak Copy-Paste",
       "title": "Judul singkat temuan (maks 10 kata)",
-      "detail": "Penjelasan detail: apa yang ditemukan, di mana, dan mengapa ini menjadi masalah.",
-      "page_hint": "Hal. 3 / Bagian II",
-      "property": "nama properti (kosong jika berlaku untuk semua)"
+      "detail": "Penjelasan detail: apa yang ditemukan, di mana (sebutkan bab/halaman spesifik), dan mengapa ini masalah. Kutip teks bermasalah jika relevan.",
+      "page_hint": "Hal. 3 / Bab 1.7",
+      "property": ""
     }
   ]
 }
 
 Panduan severity:
-- kritikal: kesalahan yang dapat mempengaruhi nilai atau validitas laporan
-- minor: ketidakkonsistenan kecil atau potensi perbaikan
+- kritikal: mempengaruhi nilai, validitas, atau dapat menyesatkan pembaca
+- minor: ketidakkonsistenan kecil, potensi perbaikan, typo
 - ok: elemen yang sudah benar dan sesuai standar
-- info: catatan atau saran yang perlu diperhatikan
+- info: catatan atau saran
 
-overall_score: 0-100, di mana 100 = sempurna tanpa temuan kritikal/minor."""
+overall_score: 0-100 (100 = sempurna tanpa kritikal/minor)."""
+
+
+# ══════════════════════════════════════════════
+# EXCEL PARSER
+# ══════════════════════════════════════════════
+
+def parse_excel_workbook(file) -> dict:
+    """
+    Parse file XLSX dan ekstrak semua data numerik beserta label/konteksnya.
+    Returns dict: {
+        "sheets": [{name, rows: [{label, value, cell, row_idx, col_idx}]}],
+        "number_map": {value_int: [{label, sheet, cell}]},
+        "all_numbers": [float],
+        "summary": str
+    }
+    """
+    if not EXCEL_AVAILABLE:
+        return {"error": "openpyxl tidak tersedia", "sheets": [], "number_map": {}, "all_numbers": []}
+
+    try:
+        wb = openpyxl.load_workbook(file, data_only=True)
+        result = {"sheets": [], "number_map": {}, "all_numbers": [], "summary": ""}
+        summary_lines = []
+
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            sheet_data = {"name": sheet_name, "rows": []}
+            sheet_numbers = 0
+
+            # Baca semua baris
+            for row in ws.iter_rows():
+                row_label = ""
+                # Ambil label dari kolom teks pertama di baris ini
+                for cell in row:
+                    if cell.value is not None and isinstance(cell.value, str) and cell.value.strip():
+                        row_label = cell.value.strip()[:80]
+                        break
+
+                for cell in row:
+                    if cell.value is None:
+                        continue
+                    val = cell.value
+
+                    # Proses nilai numerik
+                    if isinstance(val, (int, float)) and not isinstance(val, bool):
+                        if val == 0:
+                            continue
+                        # Cari label dari kolom sebelumnya di baris yang sama
+                        label = row_label
+
+                        entry = {
+                            "label": label,
+                            "value": float(val),
+                            "cell": cell.coordinate,
+                            "sheet": sheet_name,
+                        }
+                        sheet_data["rows"].append(entry)
+                        result["all_numbers"].append(float(val))
+                        sheet_numbers += 1
+
+                        # Tambah ke number_map dengan key = round ke integer
+                        key = int(abs(val))
+                        if key > 0:
+                            if key not in result["number_map"]:
+                                result["number_map"][key] = []
+                            result["number_map"][key].append({
+                                "label": label,
+                                "sheet": sheet_name,
+                                "cell": cell.coordinate,
+                                "value": float(val),
+                            })
+
+            result["sheets"].append(sheet_data)
+            if sheet_numbers > 0:
+                summary_lines.append(f"Sheet '{sheet_name}': {sheet_numbers} nilai numerik")
+
+        result["summary"] = "\n".join(summary_lines) if summary_lines else "Tidak ada data numerik ditemukan"
+        return result
+
+    except Exception as e:
+        return {"error": str(e), "sheets": [], "number_map": {}, "all_numbers": []}
+
+
+def extract_doc_numbers(doc_text: str) -> list:
+    """
+    Ekstrak semua angka dari teks dokumen beserta konteksnya.
+    Returns list of {value, context, raw_str}
+    """
+    results = []
+    # Pattern: angka dengan titik sebagai ribuan dan koma sebagai desimal (format Indonesia)
+    pattern = re.compile(
+        r'(?<![.\d])'                     # tidak diawali digit/titik
+        r'(\d{1,3}(?:\.\d{3})+(?:,\d+)?'  # 1.234.567 atau 1.234.567,89
+        r'|\d{4,}(?:,\d+)?)'              # atau 4+ digit tanpa titik
+        r'(?![.\d])',                      # tidak diikuti digit/titik
+        re.MULTILINE
+    )
+
+    for m in pattern.finditer(doc_text):
+        raw = m.group()
+        # Parse ke float
+        try:
+            # Format Indonesia: titik = ribuan, koma = desimal
+            normalized = raw.replace('.', '').replace(',', '.')
+            val = float(normalized)
+            if val < 10:   # skip angka kecil
+                continue
+            # Ambil konteks 60 karakter di sekitar angka
+            start = max(0, m.start() - 60)
+            end   = min(len(doc_text), m.end() + 60)
+            ctx   = doc_text[start:end].replace('\n', ' ').strip()
+            results.append({"value": val, "raw_str": raw, "context": ctx})
+        except (ValueError, OverflowError):
+            continue
+
+    # Deduplikasi berdasarkan value + context yang mirip
+    seen = set()
+    deduped = []
+    for r in results:
+        key = (int(r["value"]), r["context"][:30])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+    return deduped
+
+
+def compare_doc_with_excel(doc_numbers: list, excel_data: dict,
+                           tolerance_pct: float = 0.001) -> dict:
+    """
+    Bandingkan angka di dokumen dengan data Excel.
+    Returns {
+        "matches": [...],
+        "not_found": [...],
+        "summary": str
+    }
+    """
+    if not excel_data or not excel_data.get("number_map"):
+        return {"matches": [], "not_found": [], "summary": "Data Excel tidak tersedia"}
+
+    number_map = excel_data["number_map"]
+    matches    = []
+    not_found  = []
+
+    for dn in doc_numbers:
+        val      = dn["value"]
+        val_int  = int(abs(val))
+        found    = False
+
+        # Cari exact match (dalam toleransi)
+        for delta in range(-2, 3):  # toleransi ±2 karena pembulatan
+            key = val_int + delta
+            if key in number_map:
+                for em in number_map[key]:
+                    diff_pct = abs(val - em["value"]) / max(abs(em["value"]), 1)
+                    if diff_pct <= tolerance_pct:
+                        matches.append({
+                            "doc_value":   val,
+                            "doc_raw":     dn["raw_str"],
+                            "doc_context": dn["context"],
+                            "excel_value": em["value"],
+                            "excel_label": em["label"],
+                            "excel_sheet": em["sheet"],
+                            "excel_cell":  em["cell"],
+                            "status":      "match",
+                        })
+                        found = True
+                        break
+                if found:
+                    break
+
+        if not found and val > 100:  # hanya flag angka > 100
+            not_found.append({
+                "doc_value":   val,
+                "doc_raw":     dn["raw_str"],
+                "doc_context": dn["context"],
+                "status":      "not_found",
+            })
+
+    n_match = len(matches)
+    n_miss  = len(not_found)
+    total   = n_match + n_miss
+    pct     = (n_match / total * 100) if total > 0 else 0
+
+    summary = (
+        f"Total angka diperiksa: {total} | "
+        f"✅ Cocok: {n_match} ({pct:.0f}%) | "
+        f"❓ Tidak ditemukan di Excel: {n_miss}"
+    )
+    return {"matches": matches, "not_found": not_found, "summary": summary}
+
+
+def build_excel_context_for_prompt(excel_data: dict, max_chars: int = 8000) -> str:
+    """
+    Buat ringkasan data Excel untuk disertakan dalam prompt Claude.
+    """
+    if not excel_data or excel_data.get("error"):
+        return ""
+
+    lines = ["=== DATA LEMBAR KERJA (EXCEL) ===\n"]
+    lines.append(excel_data.get("summary", "") + "\n")
+
+    total_chars = sum(len(l) for l in lines)
+    for sheet in excel_data.get("sheets", []):
+        sname = sheet["name"]
+        rows  = sheet["rows"]
+        if not rows:
+            continue
+        lines.append(f"\n--- Sheet: {sname} ---\n")
+        for r in rows:
+            if r["value"] == 0:
+                continue
+            line = f"  [{r['cell']}] {r['label']}: {r['value']:,.2f}\n"
+            if total_chars + len(line) > max_chars:
+                lines.append("  ... (data terpotong)\n")
+                break
+            lines.append(line)
+            total_chars += len(line)
+
+    lines.append("\nInstruksi komparasi Excel:\n")
+    lines.append(
+        "Bandingkan angka-angka penting dalam laporan dengan data Excel di atas. "
+        "Jika ada angka di laporan yang tidak cocok dengan Excel, atau ada angka di Excel "
+        "yang tidak ada di laporan, tandai sebagai temuan dengan severity 'kritikal'. "
+        "Khususnya periksa: nilai kesimpulan penilaian, angka laporan keuangan, "
+        "persentase kepemilikan, dan nilai per komponen/aset.\n"
+    )
+    return "".join(lines)
+
+
+# ══════════════════════════════════════════════
+# LOKAL CHECKER: ARTEFAK & PLACEHOLDER
+# ══════════════════════════════════════════════
+
+def cek_artefak_dan_placeholder(doc_text: str, mode_key: str) -> dict:
+    """
+    Deteksi lokal (tanpa AI) untuk:
+    1. Artefak copy-paste (nama entitas asing)
+    2. Placeholder belum diisi
+    3. Penomoran ganda tabel/gambar
+    """
+    findings = []
+
+    # ── CEK PLACEHOLDER ──────────────────────────────────────────────────────
+    ph_hits = []
+    for pat_str in PLACEHOLDER_PATTERNS:
+        for m in re.finditer(pat_str, doc_text, re.IGNORECASE | re.MULTILINE):
+            ctx_start = max(0, m.start() - 80)
+            ctx_end   = min(len(doc_text), m.end() + 80)
+            ctx = doc_text[ctx_start:ctx_end].replace('\n', ' ').strip()
+            ph_hits.append({"text": m.group(), "context": ctx})
+
+    if ph_hits:
+        hits_str = "\n".join(
+            f'• "{h["text"]}" → ...{h["context"]}...'
+            for h in ph_hits[:8]
+        )
+        findings.append({
+            "id": "L001",
+            "severity": "kritikal",
+            "category": "Placeholder Belum Diisi",
+            "title": f"Ditemukan {len(ph_hits)} placeholder yang belum diisi",
+            "detail": (
+                f"Terdapat {len(ph_hits)} bagian yang tampak belum selesai diisi:\n"
+                + hits_str
+            ),
+            "page_hint": "Cek seluruh dokumen",
+            "property": "",
+        })
+    else:
+        findings.append({
+            "id": "L001",
+            "severity": "ok",
+            "category": "Placeholder",
+            "title": "Tidak ditemukan placeholder yang belum diisi",
+            "detail": "Semua nilai dalam dokumen tampak sudah diisi (tidak ada 'xx', tabel kosong, dll).",
+            "page_hint": "",
+            "property": "",
+        })
+
+    # ── CEK PENOMORAN GANDA TABEL ─────────────────────────────────────────────
+    tabel_nums = {}
+    for m in re.finditer(r'\bTabel\s+(\d+[\.\d]*)', doc_text, re.IGNORECASE):
+        num = m.group(1)
+        tabel_nums.setdefault(num, []).append(m.start())
+    duplikat_tabel = {k: v for k, v in tabel_nums.items() if len(v) > 2}
+    # > 2 karena penomoran mungkin muncul dalam daftar tabel dan di body
+
+    gambar_nums = {}
+    for m in re.finditer(r'\bGambar\s+(\d+[\.\d]*)', doc_text, re.IGNORECASE):
+        num = m.group(1)
+        gambar_nums.setdefault(num, []).append(m.start())
+    duplikat_gambar = {k: v for k, v in gambar_nums.items() if len(v) > 2}
+
+    if duplikat_tabel or duplikat_gambar:
+        detail_parts = []
+        for num, positions in sorted(duplikat_tabel.items()):
+            detail_parts.append(f"Tabel {num}: muncul {len(positions)} kali")
+        for num, positions in sorted(duplikat_gambar.items()):
+            detail_parts.append(f"Gambar {num}: muncul {len(positions)} kali")
+        findings.append({
+            "id": "L002",
+            "severity": "minor",
+            "category": "Penomoran Ganda",
+            "title": f"Penomoran duplikat: {len(duplikat_tabel)} tabel, {len(duplikat_gambar)} gambar",
+            "detail": (
+                "Nomor tabel/gambar berikut muncul lebih dari 2 kali — "
+                "kemungkinan ada penomoran ganda:\n"
+                + "\n".join(f"• {d}" for d in detail_parts[:10])
+            ),
+            "page_hint": "Cek daftar tabel/gambar",
+            "property": "",
+        })
+    else:
+        findings.append({
+            "id": "L002",
+            "severity": "ok",
+            "category": "Penomoran",
+            "title": "Tidak ditemukan penomoran ganda tabel/gambar",
+            "detail": "Penomoran tabel dan gambar tampak unik.",
+            "page_hint": "",
+            "property": "",
+        })
+
+    # ── CEK PENOMORAN SUB-BAB LOMPAT ─────────────────────────────────────────
+    subbab_issues = []
+    # Cari pola x.y.z dan cek apakah ada lompatan
+    section_nums = []
+    for m in re.finditer(r'\b(\d+)\.(\d+)\.(\d+)\b', doc_text):
+        section_nums.append((int(m.group(1)), int(m.group(2)), int(m.group(3)), m.start()))
+
+    # Deteksi sub-bab yang salah parent (misal 3.6.2 di dalam 3.7)
+    for i in range(1, len(section_nums)):
+        prev = section_nums[i-1]
+        curr = section_nums[i]
+        if curr[0] == prev[0] and curr[1] > prev[1] + 1:
+            # Ada lompatan di level 2 dengan parent yang sama
+            subbab_issues.append(
+                f"{prev[0]}.{prev[1]}.x → {curr[0]}.{curr[1]}.{curr[2]} "
+                f"(lompat {curr[1] - prev[1] - 1} level)"
+            )
+
+    if subbab_issues:
+        findings.append({
+            "id": "L003",
+            "severity": "minor",
+            "category": "Penomoran Sub-Bab",
+            "title": f"Ditemukan {len(subbab_issues)} penomoran sub-bab yang tidak urut",
+            "detail": (
+                "Penomoran sub-bab berikut tampak tidak urut atau salah:\n"
+                + "\n".join(f"• {s}" for s in subbab_issues[:5])
+                + "\nPeriksa apakah ada nomor sub-bab yang salah (misalnya 3.6.2 seharusnya 3.7.1)."
+            ),
+            "page_hint": "Cek daftar isi",
+            "property": "",
+        })
+
+    # ── CEK KONSISTENSI EJAAN "batu bara" / "batubara" ──────────────────────
+    n_batu_bara = len(re.findall(r'\bbatu bara\b', doc_text, re.IGNORECASE))
+    n_batubara  = len(re.findall(r'\bbatubara\b',  doc_text, re.IGNORECASE))
+    if n_batu_bara > 0 and n_batubara > 0:
+        findings.append({
+            "id": "L004",
+            "severity": "minor",
+            "category": "Inkonsistensi Ejaan",
+            "title": "Penulisan 'batu bara' dan 'batubara' tidak konsisten",
+            "detail": (
+                f"'batu bara' (dua kata) muncul {n_batu_bara}× dan "
+                f"'batubara' (satu kata) muncul {n_batubara}×. "
+                "Pilih satu format dan terapkan konsisten di seluruh dokumen. "
+                "EYD menggunakan 'batu bara' (dua kata)."
+            ),
+            "page_hint": "Seluruh dokumen",
+            "property": "",
+        })
+
+    return {
+        "findings":   findings,
+        "n_kritikal": sum(1 for f in findings if f["severity"] == "kritikal"),
+        "n_minor":    sum(1 for f in findings if f["severity"] == "minor"),
+        "n_ok":       sum(1 for f in findings if f["severity"] == "ok"),
+    }
 
 
 # ══════════════════════════════════════════════
@@ -445,41 +826,33 @@ overall_score: 0-100, di mana 100 = sempurna tanpa temuan kritikal/minor."""
 
 @st.cache_resource(show_spinner=False)
 def get_gsheet_client():
-    """
-    Buat koneksi ke Google Sheets menggunakan credentials dari st.secrets.
-    Kembalikan (client, spreadsheet, error_msg).
-    """
-    # Cek apakah secrets ada
+    if not GSPREAD_AVAILABLE:
+        return None, None, "gspread tidak tersedia"
     if "gcp_service_account" not in st.secrets:
         return None, None, "KEY_MISSING: 'gcp_service_account' tidak ditemukan di Secrets"
     if "spreadsheet_id" not in st.secrets:
         return None, None, "KEY_MISSING: 'spreadsheet_id' tidak ditemukan di Secrets"
     try:
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = Credentials.from_service_account_info(creds_dict, scopes=GSPREAD_SCOPES)
-        client = gspread.authorize(creds)
-        spreadsheet_id = st.secrets["spreadsheet_id"]
-        spreadsheet = client.open_by_key(spreadsheet_id)
+        creds_dict   = dict(st.secrets["gcp_service_account"])
+        creds        = Credentials.from_service_account_info(creds_dict, scopes=GSPREAD_SCOPES)
+        client       = gspread.authorize(creds)
+        spreadsheet  = client.open_by_key(st.secrets["spreadsheet_id"])
         return client, spreadsheet, None
     except Exception as e:
         return None, None, str(e)
 
 
 def get_or_create_sheet(spreadsheet, sheet_name: str, headers: list):
-    """Ambil worksheet, buat jika belum ada, lengkapi header."""
     try:
         ws = spreadsheet.worksheet(sheet_name)
-    except gspread.WorksheetNotFound:
+    except Exception:
         ws = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
         ws.append_row(headers)
-    # Pastikan header ada di baris pertama
     existing = ws.row_values(1)
     if existing != headers:
         ws.insert_row(headers, 1)
     return ws
 
-
-# ── RIWAYAT AUDIT ──────────────────────────────
 
 RIWAYAT_HEADERS = [
     "audit_id", "timestamp", "files", "mode",
@@ -487,17 +860,14 @@ RIWAYAT_HEADERS = [
     "report_type", "properties", "executive_summary", "findings_json"
 ]
 
+
 def load_riwayat(spreadsheet) -> dict:
-    """
-    Baca sheet riwayat_audit → dict {audit_id: {...}}.
-    Fallback ke session_state jika sheets tidak tersedia.
-    """
     if spreadsheet is None:
         return st.session_state.get("riwayat_local", {})
     try:
-        ws = get_or_create_sheet(spreadsheet, SHEET_RIWAYAT, RIWAYAT_HEADERS)
+        ws      = get_or_create_sheet(spreadsheet, SHEET_RIWAYAT, RIWAYAT_HEADERS)
         records = ws.get_all_records()
-        result = {}
+        result  = {}
         for row in records:
             aid = str(row.get("audit_id", ""))
             if not aid:
@@ -511,15 +881,15 @@ def load_riwayat(spreadsheet) -> dict:
             except Exception:
                 props = []
             result[aid] = {
-                "timestamp":         row.get("timestamp", ""),
-                "files":             row.get("files", "").split("|"),
-                "mode":              row.get("mode", ""),
-                "score":             int(row.get("score", 0)),
-                "kritikal":          int(row.get("kritikal", 0)),
-                "minor":             int(row.get("minor", 0)),
+                "timestamp": row.get("timestamp", ""),
+                "files":     row.get("files", "").split("|"),
+                "mode":      row.get("mode", ""),
+                "score":     int(row.get("score", 0)),
+                "kritikal":  int(row.get("kritikal", 0)),
+                "minor":     int(row.get("minor", 0)),
                 "result": {
-                    "report_type":   row.get("report_type", ""),
-                    "properties":    props,
+                    "report_type": row.get("report_type", ""),
+                    "properties":  props,
                     "summary": {
                         "overall_score":     int(row.get("score", 0)),
                         "kritikal":          int(row.get("kritikal", 0)),
@@ -531,23 +901,21 @@ def load_riwayat(spreadsheet) -> dict:
             }
         return result
     except Exception as e:
-        st.warning(f"⚠️ Gagal membaca riwayat dari Sheets: {e}")
+        st.warning(f"⚠️ Gagal membaca riwayat: {e}")
         return st.session_state.get("riwayat_local", {})
 
 
 def save_riwayat_row(spreadsheet, audit_id: str, data: dict):
-    """Tambahkan satu baris riwayat ke sheet."""
     if spreadsheet is None:
-        # Fallback: simpan di session_state
         local = st.session_state.get("riwayat_local", {})
         local[audit_id] = data
         st.session_state["riwayat_local"] = local
         return
     try:
-        ws = get_or_create_sheet(spreadsheet, SHEET_RIWAYAT, RIWAYAT_HEADERS)
+        ws      = get_or_create_sheet(spreadsheet, SHEET_RIWAYAT, RIWAYAT_HEADERS)
         result  = data.get("result", {})
         summary = result.get("summary", {})
-        row = [
+        ws.append_row([
             audit_id,
             data.get("timestamp", ""),
             "|".join(data.get("files", [])),
@@ -559,17 +927,15 @@ def save_riwayat_row(spreadsheet, audit_id: str, data: dict):
             json.dumps(result.get("properties", []), ensure_ascii=False),
             summary.get("executive_summary", ""),
             json.dumps(result.get("findings", []), ensure_ascii=False),
-        ]
-        ws.append_row(row, value_input_option="USER_ENTERED")
+        ], value_input_option="USER_ENTERED")
     except Exception as e:
-        st.warning(f"⚠️ Gagal menyimpan riwayat ke Sheets: {e}")
+        st.warning(f"⚠️ Gagal menyimpan riwayat: {e}")
         local = st.session_state.get("riwayat_local", {})
         local[audit_id] = data
         st.session_state["riwayat_local"] = local
 
 
 def clear_riwayat(spreadsheet):
-    """Hapus semua baris riwayat (kecuali header)."""
     if spreadsheet is None:
         st.session_state["riwayat_local"] = {}
         return
@@ -581,24 +947,20 @@ def clear_riwayat(spreadsheet):
         st.warning(f"⚠️ Gagal menghapus riwayat: {e}")
 
 
-# ── DATA LAPORAN / REFERENSI ────────────────────
-
 REFERENSI_HEADERS = ["nama_laporan", "keterangan", "jumlah"]
 
+
 def load_data_laporan(spreadsheet) -> dict:
-    """
-    Baca sheet data_laporan → dict {nama_laporan: {keterangan: jumlah}}.
-    """
     if spreadsheet is None:
         return st.session_state.get("data_laporan_local", {})
     try:
-        ws = get_or_create_sheet(spreadsheet, SHEET_REFERENSI, REFERENSI_HEADERS)
+        ws      = get_or_create_sheet(spreadsheet, SHEET_REFERENSI, REFERENSI_HEADERS)
         records = ws.get_all_records()
-        result = {}
+        result  = {}
         for row in records:
-            lap  = str(row.get("nama_laporan", "")).strip()
-            ket  = str(row.get("keterangan", "")).strip()
-            jml  = row.get("jumlah", 0)
+            lap = str(row.get("nama_laporan", "")).strip()
+            ket = str(row.get("keterangan", "")).strip()
+            jml = row.get("jumlah", 0)
             if not lap:
                 continue
             result.setdefault(lap, {})
@@ -609,12 +971,11 @@ def load_data_laporan(spreadsheet) -> dict:
                     result[lap][ket] = 0
         return result
     except Exception as e:
-        st.warning(f"⚠️ Gagal membaca referensi dari Sheets: {e}")
+        st.warning(f"⚠️ Gagal membaca referensi: {e}")
         return st.session_state.get("data_laporan_local", {})
 
 
 def save_referensi_row(spreadsheet, nama_laporan: str, keterangan: str, jumlah: int):
-    """Tambah satu baris ke sheet referensi."""
     if spreadsheet is None:
         local = st.session_state.get("data_laporan_local", {})
         local.setdefault(nama_laporan, {})[keterangan] = jumlah
@@ -628,7 +989,6 @@ def save_referensi_row(spreadsheet, nama_laporan: str, keterangan: str, jumlah: 
 
 
 def delete_referensi_row(spreadsheet, nama_laporan: str, keterangan: str):
-    """Hapus baris dengan nama_laporan+keterangan tertentu."""
     if spreadsheet is None:
         local = st.session_state.get("data_laporan_local", {})
         if nama_laporan in local and keterangan in local[nama_laporan]:
@@ -636,18 +996,17 @@ def delete_referensi_row(spreadsheet, nama_laporan: str, keterangan: str):
         st.session_state["data_laporan_local"] = local
         return
     try:
-        ws = get_or_create_sheet(spreadsheet, SHEET_REFERENSI, REFERENSI_HEADERS)
+        ws       = get_or_create_sheet(spreadsheet, SHEET_REFERENSI, REFERENSI_HEADERS)
         all_vals = ws.get_all_values()
-        for i, row in enumerate(all_vals[1:], start=2):   # skip header
+        for i, row in enumerate(all_vals[1:], start=2):
             if len(row) >= 2 and row[0] == nama_laporan and row[1] == keterangan:
                 ws.delete_rows(i)
                 break
     except Exception as e:
-        st.warning(f"⚠️ Gagal menghapus baris referensi: {e}")
+        st.warning(f"⚠️ Gagal menghapus referensi: {e}")
 
 
 def add_laporan_baru(spreadsheet, nama_laporan: str):
-    """Tambah laporan baru (baris placeholder tanpa keterangan)."""
     if spreadsheet is None:
         local = st.session_state.get("data_laporan_local", {})
         local.setdefault(nama_laporan, {})
@@ -661,21 +1020,40 @@ def add_laporan_baru(spreadsheet, nama_laporan: str):
 
 
 # ══════════════════════════════════════════════
-# HELPER: EKSTRAKSI TEKS
+# HELPER: EKSTRAKSI TEKS DOKUMEN
 # ══════════════════════════════════════════════
 
 def extract_text_pdf(file) -> list:
+    """Ekstrak teks per halaman dari PDF."""
+    pages = []
     try:
-        reader = PyPDF2.PdfReader(file)
-        return [page.extract_text() or "" for page in reader.pages]
+        if PDF_ENGINE == "pdfplumber":
+            import pdfplumber
+            with pdfplumber.open(file) as pdf:
+                for page in pdf.pages:
+                    text = page.extract_text() or ""
+                    pages.append(text)
+        else:
+            import PyPDF2
+            reader = PyPDF2.PdfReader(file)
+            for page in reader.pages:
+                pages.append(page.extract_text() or "")
     except Exception as e:
         st.warning(f"⚠️ Gagal membaca PDF '{file.name}': {e}")
-        return []
+    return pages
+
 
 def extract_text_docx(file) -> list:
+    """Ekstrak teks dari DOCX, dibagi per ~30 paragraf."""
     try:
-        doc = Document(file)
+        doc        = Document(file)
         paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
+        # Sertakan juga teks dari tabel
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text.strip():
+                        paragraphs.append(cell.text.strip())
         pages, chunk = [], []
         for i, p in enumerate(paragraphs):
             chunk.append(p)
@@ -688,6 +1066,7 @@ def extract_text_docx(file) -> list:
     except Exception as e:
         st.warning(f"⚠️ Gagal membaca DOCX '{file.name}': {e}")
         return []
+
 
 def pages_to_text(pages: list, max_chars: int = MAX_CHARS) -> str:
     parts, total = [], 0
@@ -702,16 +1081,10 @@ def pages_to_text(pages: list, max_chars: int = MAX_CHARS) -> str:
 
 
 # ══════════════════════════════════════════════
-# HELPER: CLAUDE API
-# ══════════════════════════════════════════════
-
-
-# ══════════════════════════════════════════════
 # ENGINE: PENGECEKAN MATEMATIKA RESUME PENILAIAN
 # ══════════════════════════════════════════════
 
 def parse_id_number(s):
-    """Parse angka format Indonesia ke float."""
     if not s:
         return None
     s = str(s).strip()
@@ -727,24 +1100,17 @@ def parse_id_number(s):
         return None
 
 
-def cek_matematika_resume(doc_text):
-    """
-    Pengecekan matematika otomatis pada Resume Penilaian.
-    Cek: penjumlahan komponen Rp/USD, konversi kurs, konsistensi
-    nilai kesimpulan, dan formula BPB × (1-penyusutan%) = nilai pasar.
-    """
+def cek_matematika_resume(doc_text: str) -> dict:
     TOLERANSI_BULAT = 0.005
     TOLERANSI_KURS  = 0.01
-    findings  = []
-    extracted = {}
+    findings, extracted = [], {}
 
-    # ── Ekstrak kurs BI ───────────────────────────────────────────────────────
+    # Ekstrak kurs BI
     kurs_bi = None
-    kurs_pats = [
+    for pat in [
         r'(?:US\$\s*1\s*=\s*Rp|1\s*US\$\s*=\s*Rp)\s*([\d\.]+(?:,\d+)?)',
         r'(?:kurs|nilai tukar)[^\n]*(?:US\$|USD)[^\n]*Rp\s*([\d\.]+(?:,\d+)?)',
-    ]
-    for pat in kurs_pats:
+    ]:
         km = re.search(pat, doc_text, re.IGNORECASE)
         if km:
             v = parse_id_number(km.group(1))
@@ -753,9 +1119,7 @@ def cek_matematika_resume(doc_text):
                 extracted["kurs_bi"] = v
                 break
 
-    # ── Ekstrak komponen resume ───────────────────────────────────────────────
-    # Pattern utama: "A.  Nama   ...5+spasi...  angka_rp  angka_usd"
-    # Format SRR: titik sebagai ribuan (393.408.400), blank lines antar baris
+    # Ekstrak komponen resume (format SRR: A. Nama ... angka_rp angka_usd)
     comp_pat = re.compile(
         r"[ \t]*([A-F])\.[ \t]+(.+?)[ \t]{5,}"
         r"([\d]{1,3}(?:\.[\d]{3})+)[ \t]+"
@@ -763,19 +1127,16 @@ def cek_matematika_resume(doc_text):
         re.MULTILINE
     )
     components = {}
-    search_zone = doc_text[:60000]
-    for m in comp_pat.finditer(search_zone):
+    zone = doc_text[:60000]
+    for m in comp_pat.finditer(zone):
         rp_v  = parse_id_number(m.group(3))
         usd_v = parse_id_number(m.group(4))
         if rp_v and rp_v > 0 and m.group(1) not in components:
             components[m.group(1)] = {
-                "nama":    m.group(2).strip()[:60],
-                "rp":      rp_v,
-                "usd":     usd_v,
-                "rp_raw":  m.group(3),
-                "usd_raw": m.group(4),
+                "nama": m.group(2).strip()[:60],
+                "rp": rp_v, "usd": usd_v,
+                "rp_raw": m.group(3), "usd_raw": m.group(4),
             }
-    # Fallback: format koma/titik campuran (docx/Word)
     if not components:
         comp_pat2 = re.compile(
             r"[ \t]*([A-F])\.[ \t]+(.+?)[ \t]{3,}"
@@ -783,31 +1144,28 @@ def cek_matematika_resume(doc_text):
             r"([\d]{1,3}(?:[.,][\d]{3})*(?:[.,][\d]{1,2})?)",
             re.MULTILINE
         )
-        for m in comp_pat2.finditer(search_zone):
+        for m in comp_pat2.finditer(zone):
             rp_v  = parse_id_number(m.group(3))
             usd_v = parse_id_number(m.group(4))
             if rp_v and rp_v > 0 and m.group(1) not in components:
                 components[m.group(1)] = {
                     "nama": m.group(2).strip()[:60],
-                    "rp":   rp_v, "usd": usd_v,
+                    "rp": rp_v, "usd": usd_v,
                     "rp_raw": m.group(3), "usd_raw": m.group(4),
                 }
     extracted["components"] = components
 
-    # ── Ekstrak total ─────────────────────────────────────────────────────────
+    # Ekstrak total
     total_rp = total_usd = None
-    # Deteksi apakah resume dalam satuan ribuan
     resume_ribuan = bool(re.search(
         r'Rp\s*\.?000|Rp\s+[Rr]ibu|\(Rp\s*,000|\(Rp\s+000',
         doc_text[:60000], re.IGNORECASE
     ))
     extracted["resume_ribuan"] = resume_ribuan
-
-    tot_pats = [
+    for pat in [
         r'Total\s+[A-F\-]+\s+([\d]{1,3}(?:\.[\d]{3})+)[ \t]+([\d]{1,3}(?:\.[\d]{3})+)',
         r'(?:Total|TOTAL)\s+([\d]{1,3}(?:[.,][\d]{3})*(?:[.,][\d]{1,2})?)\s+([\d]{1,3}(?:[.,][\d]{3})*(?:[.,][\d]{1,2})?)',
-    ]
-    for pat in tot_pats:
+    ]:
         tm = re.search(pat, doc_text[:60000], re.IGNORECASE)
         if tm:
             tv = parse_id_number(tm.group(1))
@@ -818,219 +1176,180 @@ def cek_matematika_resume(doc_text):
                 extracted["total_usd"] = total_usd
                 break
 
-    # ── Ekstrak nilai kesimpulan ──────────────────────────────────────────────
+    # Ekstrak nilai kesimpulan
     conclusion_rp = conclusion_usd = None
-    conc_pat = re.compile(
+    cm = re.compile(
         r'(?:nilai pasar|NILAI PASAR|kesimpulan|KESIMPULAN)[^\n]{0,120}'
         r'Rp\s*([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
         re.IGNORECASE | re.DOTALL
-    )
-    cm = conc_pat.search(doc_text)
+    ).search(doc_text)
     if cm:
         conclusion_rp = parse_id_number(cm.group(1))
-        usd_near = doc_text[cm.start():cm.start() + 500]
-        um = re.search(r'US\$\s*([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)', usd_near, re.IGNORECASE)
+        um = re.search(r'US\$\s*([\d]{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
+                       doc_text[cm.start():cm.start()+500], re.IGNORECASE)
         if um:
             conclusion_usd = parse_id_number(um.group(1))
     if conclusion_rp:
         extracted["conclusion_rp"]  = conclusion_rp
         extracted["conclusion_usd"] = conclusion_usd
 
-    # ── Ekstrak tabel BPB + penyusutan ────────────────────────────────────────
+    # Ekstrak BPB items
     bpb_items = []
-    bpb_pat = re.compile(
+    for m in re.compile(
         r'(?:Tanah|Bangunan|Sarana|Mesin|Kendaraan)[^\n]{0,80}'
-        r'([\d]{1,3}(?:[.,]\d{3})*)\s+'
-        r'([\d,\.]+)%\s*'
-        r'([\d]{1,3}(?:[.,]\d{3})*)',
+        r'([\d]{1,3}(?:[.,]\d{3})*)\s+([\d,\.]+)%\s*([\d]{1,3}(?:[.,]\d{3})*)',
         re.IGNORECASE
-    )
-    for m in bpb_pat.finditer(doc_text):
-        bpb_v  = parse_id_number(m.group(1))
-        depr_s = m.group(2).replace(',', '.')
-        mkt_v  = parse_id_number(m.group(3))
+    ).finditer(doc_text):
+        bpb_v = parse_id_number(m.group(1))
+        mkt_v = parse_id_number(m.group(3))
         try:
-            depr_pct = float(depr_s) / 100
+            depr_pct = float(m.group(2).replace(',', '.')) / 100
         except ValueError:
             continue
         if bpb_v and mkt_v and bpb_v > 0:
             bpb_items.append({
                 "bpb": bpb_v, "depr_pct": depr_pct, "mkt_val": mkt_v,
                 "expected": bpb_v * (1 - depr_pct),
-                "context": doc_text[max(0, m.start()-40):m.start()+60].strip()
             })
     extracted["bpb_items"] = bpb_items
 
-    # ══ CEK 1: Penjumlahan Rp ════════════════════════════════════════════════
+    # Cek 1: Penjumlahan Rp
     if components and total_rp:
-        sum_rp  = sum(c["rp"] for c in components.values())
-        diff    = abs(sum_rp - total_rp)
-        tol     = total_rp * TOLERANSI_BULAT
-        last_k  = list(components.keys())[-1]
-        ok = diff <= tol
+        sum_rp = sum(c["rp"] for c in components.values())
+        diff   = abs(sum_rp - total_rp)
+        ok     = diff <= total_rp * TOLERANSI_BULAT
+        last_k = list(components.keys())[-1]
         findings.append({
-            "id": "M001",
-            "severity": "ok" if ok else "kritikal",
+            "id": "M001", "severity": "ok" if ok else "kritikal",
             "category": "Formula Resume",
-            "title": ("Penjumlahan komponen Rp sesuai total" if ok
-                      else "Penjumlahan komponen Rp TIDAK sesuai total"),
+            "title": "Penjumlahan Rp sesuai" if ok else "Penjumlahan Rp TIDAK sesuai",
             "detail": (
-                "Jumlah komponen A-" + last_k + ": Rp " + f"{sum_rp:,.0f}" + "\n"
-                "Total tercantum: Rp " + f"{total_rp:,.0f}" + "\n"
-                + ("Selisih: Rp " + f"{diff:,.0f}" + " (dalam toleransi pembulatan)" if ok
-                   else "SELISIH: Rp " + f"{diff:,.0f}" + " — perlu diperiksa")
+                f"Jumlah komponen A-{last_k}: Rp {sum_rp:,.0f}\n"
+                f"Total tercantum: Rp {total_rp:,.0f}\n"
+                + (f"Selisih: Rp {diff:,.0f} (dalam toleransi)" if ok
+                   else f"SELISIH: Rp {diff:,.0f} — perlu diperiksa")
             ),
-            "page_hint": "Resume Penilaian",
-            "formula": "Sigma komponen Rp = " + f"{sum_rp:,.0f}",
+            "page_hint": "Resume Penilaian", "formula": f"Σ komponen Rp = {sum_rp:,.0f}",
         })
 
-    # ══ CEK 2: Penjumlahan USD ════════════════════════════════════════════════
+    # Cek 2: Penjumlahan USD
     usd_comps = {k: v for k, v in components.items() if v.get("usd")}
     if usd_comps and total_usd:
         sum_usd = sum(c["usd"] for c in usd_comps.values())
         diff    = abs(sum_usd - total_usd)
-        tol     = total_usd * TOLERANSI_BULAT
-        ok = diff <= tol
+        ok      = diff <= total_usd * TOLERANSI_BULAT
         findings.append({
-            "id": "M002",
-            "severity": "ok" if ok else "kritikal",
+            "id": "M002", "severity": "ok" if ok else "kritikal",
             "category": "Formula Resume",
-            "title": ("Penjumlahan komponen USD sesuai total" if ok
-                      else "Penjumlahan komponen USD TIDAK sesuai total"),
+            "title": "Penjumlahan USD sesuai" if ok else "Penjumlahan USD TIDAK sesuai",
             "detail": (
-                "Jumlah USD komponen: " + f"{sum_usd:,.0f}" + "\n"
-                "Total USD tercantum: " + f"{total_usd:,.0f}" + "\n"
-                + ("Selisih: " + f"{diff:,.0f}" if ok
-                   else "SELISIH: " + f"{diff:,.0f}" + " — perlu diperiksa")
+                f"Jumlah USD komponen: {sum_usd:,.0f}\n"
+                f"Total USD tercantum: {total_usd:,.0f}\n"
+                + (f"Selisih: {diff:,.0f}" if ok else f"SELISIH: {diff:,.0f} — perlu diperiksa")
             ),
-            "page_hint": "Resume Penilaian",
-            "formula": "Sigma komponen USD = " + f"{sum_usd:,.0f}",
+            "page_hint": "Resume Penilaian", "formula": f"Σ komponen USD = {sum_usd:,.0f}",
         })
 
-    # ══ CEK 3: Konversi kurs per komponen ════════════════════════════════════
+    # Cek 3: Konversi kurs per komponen
     if kurs_bi and usd_comps:
         errors = []
-        rp_mult = 1000 if extracted.get("resume_ribuan") else 1
+        rp_mult = 1000 if resume_ribuan else 1
         for kode, comp in usd_comps.items():
             exp_usd  = (comp["rp"] * rp_mult) / kurs_bi
-            act_usd  = comp["usd"]
-            diff_pct = abs(exp_usd - act_usd) / exp_usd if exp_usd else 0
+            diff_pct = abs(exp_usd - comp["usd"]) / exp_usd if exp_usd else 0
             if diff_pct > TOLERANSI_KURS:
                 errors.append(
-                    kode + ". " + comp["nama"][:30] + ": "
-                    "Rp " + f"{comp['rp']:,.0f}" + " / " + f"{kurs_bi:,.0f}" +
-                    " = USD " + f"{round(exp_usd):,.0f}" +
-                    " (tercantum: " + f"{act_usd:,.0f}" + ", selisih: " +
-                    f"{abs(act_usd - round(exp_usd)):,.0f}" + ")"
+                    f"{kode}. {comp['nama'][:30]}: "
+                    f"Rp {comp['rp']:,.0f} / {kurs_bi:,.0f} = "
+                    f"USD {round(exp_usd):,.0f} (tercantum: {comp['usd']:,.0f}, "
+                    f"selisih: {abs(comp['usd'] - round(exp_usd)):,.0f})"
                 )
         ok = len(errors) == 0
         findings.append({
-            "id": "M003",
-            "severity": "ok" if ok else "kritikal",
+            "id": "M003", "severity": "ok" if ok else "kritikal",
             "category": "Konversi Kurs",
-            "title": ("Konversi kurs per komponen sesuai" if ok
-                      else "Konversi kurs SALAH pada " + str(len(errors)) + " komponen"),
+            "title": "Konversi kurs per komponen sesuai" if ok else f"Konversi kurs SALAH pada {len(errors)} komponen",
             "detail": (
-                "Semua " + str(len(usd_comps)) + " komponen: Rp / " +
-                f"{kurs_bi:,.0f}" + " = USD (dalam toleransi)" if ok
-                else "Kurs BI: 1 USD = Rp " + f"{kurs_bi:,.0f}" + "\n" + "\n".join(errors)
+                f"Semua {len(usd_comps)} komponen: Rp / {kurs_bi:,.0f} = USD (dalam toleransi)" if ok
+                else f"Kurs BI: 1 USD = Rp {kurs_bi:,.0f}\n" + "\n".join(errors)
             ),
-            "page_hint": "Resume Penilaian",
-            "formula": "Nilai Rp / " + f"{kurs_bi:,.0f}" + " = Nilai USD",
+            "page_hint": "Resume Penilaian", "formula": f"Nilai Rp / {kurs_bi:,.0f} = Nilai USD",
         })
 
-    # ══ CEK 4: Konversi kurs total ════════════════════════════════════════════
+    # Cek 4: Konversi kurs total
     if kurs_bi and total_rp and total_usd:
-        rp_mult = 1000 if extracted.get("resume_ribuan") else 1
+        rp_mult       = 1000 if resume_ribuan else 1
         exp_total_usd = (total_rp * rp_mult) / kurs_bi
-        diff_pct = abs(exp_total_usd - total_usd) / exp_total_usd if exp_total_usd else 1
-        ok = diff_pct <= TOLERANSI_KURS
+        diff_pct      = abs(exp_total_usd - total_usd) / exp_total_usd if exp_total_usd else 1
+        ok   = diff_pct <= TOLERANSI_KURS
         exp_r = round(exp_total_usd)
         findings.append({
-            "id": "M004",
-            "severity": "ok" if ok else "kritikal",
+            "id": "M004", "severity": "ok" if ok else "kritikal",
             "category": "Konversi Kurs",
-            "title": ("Konversi kurs total Rp ke USD sesuai" if ok
-                      else "Konversi kurs TOTAL Rp ke USD tidak sesuai"),
+            "title": "Konversi kurs total sesuai" if ok else "Konversi kurs TOTAL tidak sesuai",
             "detail": (
-                "Total Rp: " + f"{total_rp:,.0f}" + "\n"
-                "Kurs BI: " + f"{kurs_bi:,.0f}" + "\n"
-                "USD seharusnya: " + f"{exp_r:,.0f}" + "\n"
-                "USD tercantum:  " + f"{total_usd:,.0f}" + "\n"
-                + ("OK" if ok else "SELISIH: " + f"{abs(total_usd - exp_r):,.0f}" +
-                   " (" + f"{diff_pct*100:.2f}" + "%)")
+                f"Total Rp: {total_rp:,.0f}\nKurs BI: {kurs_bi:,.0f}\n"
+                f"USD seharusnya: {exp_r:,.0f}\nUSD tercantum: {total_usd:,.0f}\n"
+                + ("OK" if ok else f"SELISIH: {abs(total_usd - exp_r):,.0f} ({diff_pct*100:.2f}%)")
             ),
             "page_hint": "Resume / Kesimpulan",
-            "formula": f"{total_rp:,.0f}" + " / " + f"{kurs_bi:,.0f}" +
-                       " = " + f"{exp_r:,.0f}",
+            "formula": f"{total_rp:,.0f} / {kurs_bi:,.0f} = {exp_r:,.0f}",
         })
 
-    # ══ CEK 5: Konsistensi nilai kesimpulan vs total resume ═══════════════════
+    # Cek 5: Konsistensi nilai kesimpulan vs total resume
     if total_rp and conclusion_rp:
-        # Resume biasanya satuan ribuan (Rp .000,00), kesimpulan angka penuh
         norm_total = total_rp * 1000
-        diff_pct = abs(norm_total - conclusion_rp) / conclusion_rp if conclusion_rp else 1
+        diff_pct   = abs(norm_total - conclusion_rp) / conclusion_rp if conclusion_rp else 1
         ok = diff_pct <= TOLERANSI_BULAT
         findings.append({
-            "id": "M005",
-            "severity": "ok" if ok else "kritikal",
+            "id": "M005", "severity": "ok" if ok else "kritikal",
             "category": "Konsistensi Nilai",
-            "title": ("Nilai kesimpulan konsisten dengan resume" if ok
-                      else "Nilai kesimpulan TIDAK konsisten dengan resume"),
+            "title": "Nilai kesimpulan konsisten dengan resume" if ok else "Nilai kesimpulan TIDAK konsisten",
             "detail": (
-                "Total resume (ribuan): Rp " + f"{total_rp:,.0f}" + "\n"
-                "Setara penuh:          Rp " + f"{norm_total:,.0f}" + "\n"
-                "Nilai kesimpulan:      Rp " + f"{conclusion_rp:,.0f}" + "\n"
-                + ("Konsisten" if ok
-                   else "SELISIH: Rp " + f"{abs(norm_total - conclusion_rp):,.0f}")
+                f"Total resume (ribuan): Rp {total_rp:,.0f}\n"
+                f"Setara penuh: Rp {norm_total:,.0f}\n"
+                f"Nilai kesimpulan: Rp {conclusion_rp:,.0f}\n"
+                + ("Konsisten" if ok else f"SELISIH: Rp {abs(norm_total - conclusion_rp):,.0f}")
             ),
             "page_hint": "Surat Pengantar / Kesimpulan",
-            "formula": "Resume x 1.000 = Nilai Kesimpulan",
+            "formula": "Resume × 1.000 = Nilai Kesimpulan",
         })
 
-    # ══ CEK 6: BPB × (1 - penyusutan%) = nilai pasar ════════════════════════
+    # Cek 6: BPB
     if bpb_items:
         errors = []
         for item in bpb_items[:20]:
-            diff_pct = (abs(item["expected"] - item["mkt_val"]) / item["expected"]
-                        if item["expected"] > 0 else 0)
+            diff_pct = abs(item["expected"] - item["mkt_val"]) / item["expected"] if item["expected"] > 0 else 0
             if diff_pct > TOLERANSI_BULAT and abs(item["expected"] - item["mkt_val"]) > 1000:
                 errors.append(
-                    "BPB " + f"{item['bpb']:,.0f}" +
-                    " x (1-" + f"{item['depr_pct']*100:.1f}" + "%) = " +
-                    f"{round(item['expected']):,.0f}" +
-                    " (tercantum: " + f"{item['mkt_val']:,.0f}" + ", selisih: " +
-                    f"{abs(item['mkt_val'] - round(item['expected'])):,.0f}" + ")"
+                    f"BPB {item['bpb']:,.0f} × (1-{item['depr_pct']*100:.1f}%) = "
+                    f"{round(item['expected']):,.0f} (tercantum: {item['mkt_val']:,.0f}, "
+                    f"selisih: {abs(item['mkt_val'] - round(item['expected'])):,.0f})"
                 )
         ok = len(errors) == 0
         findings.append({
-            "id": "M006",
-            "severity": "ok" if ok else "minor",
+            "id": "M006", "severity": "ok" if ok else "minor",
             "category": "Formula BPB",
-            "title": ("Formula BPB x (1-penyusutan) sesuai — " +
-                      str(len(bpb_items)) + " baris" if ok
-                      else "Formula BPB perlu verifikasi — " + str(len(errors)) + " baris"),
+            "title": f"Formula BPB sesuai — {len(bpb_items)} baris" if ok else f"Formula BPB perlu verifikasi — {len(errors)} baris",
             "detail": (
-                "Semua " + str(len(bpb_items)) + " baris BPB memenuhi formula" if ok
+                f"Semua {len(bpb_items)} baris BPB memenuhi formula" if ok
                 else "Potensi ketidaksesuaian:\n" + "\n".join(errors[:5])
             ),
             "page_hint": "Bab D.1 / Tabel Ringkasan",
-            "formula": "BPB x (1 - Depresiasi%) = Nilai Pasar",
+            "formula": "BPB × (1 - Depresiasi%) = Nilai Pasar",
         })
 
     if not findings:
         findings.append({
-            "id": "M000",
-            "severity": "info",
+            "id": "M000", "severity": "info",
             "category": "Formula Resume",
             "title": "Data numerik tidak dapat diekstrak otomatis",
             "detail": (
                 "Engine tidak menemukan tabel resume dengan format yang dapat diparse. "
-                "Kemungkinan: (1) tidak ada Resume Penilaian, (2) format tabel tidak standar, "
-                "atau (3) PDF ter-scan. Pengecekan dilakukan manual atau via Claude AI."
+                "Kemungkinan: (1) tidak ada Resume Penilaian, (2) format tabel non-standar, "
+                "atau (3) PDF ter-scan."
             ),
-            "page_hint": "Resume Penilaian",
-            "formula": "-",
+            "page_hint": "Resume Penilaian", "formula": "-",
         })
 
     return {
@@ -1042,21 +1361,19 @@ def cek_matematika_resume(doc_text):
     }
 
 
+# ══════════════════════════════════════════════
+# HELPER: CALL CLAUDE API
+# ══════════════════════════════════════════════
 
 def recover_partial_json(raw_text: str):
-    """
-    Coba selamatkan JSON yang terpotong karena token limit.
-    Menggunakan 3 strategi bertingkat.
-    """
-    import re as _re
     start = raw_text.find("{")
     if start == -1:
         return None
     partial = raw_text[start:]
 
     def close_json(text):
-        cleaned = _re.sub(r',\s*"[^"]*"\s*:?\s*$', "", text.rstrip())
-        cleaned = _re.sub(r',\s*"[^"]*"\s*$', "", cleaned.rstrip())
+        cleaned = re.sub(r',\s*"[^"]*"\s*:?\s*$', "", text.rstrip())
+        cleaned = re.sub(r',\s*"[^"]*"\s*$', "", cleaned.rstrip())
         stack, in_string, esc = [], False, False
         for ch in cleaned:
             if esc: esc = False; continue
@@ -1066,10 +1383,8 @@ def recover_partial_json(raw_text: str):
             if ch in "{[": stack.append(ch)
             elif ch in "}]":
                 if stack: stack.pop()
-        closing = "".join("]" if b == "[" else "}" for b in reversed(stack))
-        return cleaned + closing
+        return cleaned + "".join("]" if b == "[" else "}" for b in reversed(stack))
 
-    # Strategi 1: close bracket
     try:
         parsed = json.loads(close_json(partial))
         parsed.setdefault("summary", {})
@@ -1080,45 +1395,38 @@ def recover_partial_json(raw_text: str):
     except Exception:
         pass
 
-    # Strategi 2: buang findings, selamatkan summary
-    fm = _re.search(r'"findings"\s*:\s*\[', partial)
-    if fm:
-        before = partial[:fm.start()]
-        se = before.rfind("}")
-        if se > 0:
-            try:
-                parsed = json.loads(before[:se+1] + ', "findings": []}')
-                parsed["_partial"] = True
-                return parsed
-            except Exception:
-                pass
-
-    # Strategi 3: ekstrak field by field
     result = {"_partial": True, "findings": [], "properties": [], "summary": {}}
-    m = _re.search(r'"report_type"\s*:\s*"([^"]*)"', partial)
-    if m: result["report_type"] = m.group(1)
-    pm = _re.search(r'"properties"\s*:\s*\[(.*?)\]', partial, _re.DOTALL)
-    if pm: result["properties"] = _re.findall(r'"([^"]+)"', pm.group(1))
+    for field in ["report_type"]:
+        m = re.search(f'"{field}"\\s*:\\s*"([^"]*)"', partial)
+        if m: result[field] = m.group(1)
     for field in ["total_findings", "kritikal", "minor", "ok", "info", "overall_score"]:
-        nm = _re.search('"'  + field + '"\\s*:\\s*(\\d+)', partial)
+        nm = re.search(f'"{field}"\\s*:\\s*(\\d+)', partial)
         if nm: result["summary"][field] = int(nm.group(1))
-    em = _re.search(r'"executive_summary"\s*:\s*"([^"]*)"', partial)
+    em = re.search(r'"executive_summary"\s*:\s*"([^"]*)"', partial)
     if em: result["summary"]["executive_summary"] = em.group(1)
-    for fr in _re.findall(r'\{\s*"id"\s*:.*?"property"\s*:\s*"[^"]*"\s*\}', partial, _re.DOTALL):
-        try: result["findings"].append(json.loads(fr))
-        except Exception: pass
-    if result.get("report_type") or result["summary"]:
-        return result
-    return None
+    return result if result.get("report_type") or result["summary"] else None
 
-def call_claude(api_key: str, mode_instruction: str, check_items: list, doc_text: str):
+
+def call_claude(api_key: str, mode_instruction: str, check_items: list,
+                doc_text: str, excel_context: str = "") -> tuple:
+    """
+    Panggil Claude API dengan instruksi mode, item cek, teks dokumen, dan (opsional) data Excel.
+    Returns (parsed_json, raw_text)
+    """
     client = anthropic.Anthropic(api_key=api_key)
+
+    excel_section = ""
+    if excel_context:
+        excel_section = f"\n\n{excel_context}"
+
     user_message = (
         f"{mode_instruction}\n\n"
         f"Item yang harus diperiksa:\n"
         + "\n".join(f"- {item}" for item in check_items)
+        + excel_section
         + f"\n\nKONTEN DOKUMEN:\n{doc_text}"
     )
+
     response = client.messages.create(
         model=MODEL,
         max_tokens=MAX_TOKENS,
@@ -1130,13 +1438,8 @@ def call_claude(api_key: str, mode_instruction: str, check_items: list, doc_text
     def try_parse(text):
         try:
             return json.loads(text)
-        except (json.JSONDecodeError, ValueError):
+        except Exception:
             return None
-
-    def fix_json(text):
-        text = re.sub(r",\s*([}\]])", r"\1", text)
-        text = re.sub(r"//[^\n]*", "", text)
-        return text
 
     parsed = try_parse(raw_text)
     if parsed is None:
@@ -1145,20 +1448,12 @@ def call_claude(api_key: str, mode_instruction: str, check_items: list, doc_text
     if parsed is None:
         for m in re.finditer(r"\{[\s\S]*\}", raw_text):
             parsed = try_parse(m.group())
-            if parsed:
-                break
+            if parsed: break
     if parsed is None:
-        fixed = fix_json(raw_text)
+        fixed = re.sub(r",\s*([}\]])", r"\1", raw_text)
         parsed = try_parse(fixed)
-        if parsed is None:
-            for m in re.finditer(r"\{[\s\S]*\}", fixed):
-                parsed = try_parse(fix_json(m.group()))
-                if parsed:
-                    break
-    # Lapis 5: recovery partial JSON (response terpotong karena token limit)
     if parsed is None:
         parsed = recover_partial_json(raw_text)
-
     if parsed is None:
         raise ValueError(
             f"Tidak bisa mem-parse JSON dari response Claude.\n"
@@ -1168,35 +1463,104 @@ def call_claude(api_key: str, mode_instruction: str, check_items: list, doc_text
 
 
 # ══════════════════════════════════════════════
+# HELPER: GENERATE LAPORAN REVIEW (DOWNLOAD)
+# ══════════════════════════════════════════════
+
+def generate_download_report(result: dict, math_result: dict,
+                              local_result: dict, files: list,
+                              mode_label: str) -> str:
+    """Buat teks laporan review untuk diunduh."""
+    lines = []
+    now   = datetime.now().strftime("%d %B %Y, %H:%M")
+    summary = result.get("summary", {})
+    lines += [
+        "=" * 70,
+        "LAPORAN REVIEW DOKUMEN",
+        f"CekLaporan v7.0 — KJPP SRR",
+        f"Tanggal  : {now}",
+        f"File     : {', '.join(files)}",
+        f"Mode     : {mode_label}",
+        f"Skor QC  : {summary.get('overall_score', 0)}/100",
+        "=" * 70, "",
+        "RINGKASAN EKSEKUTIF",
+        "-" * 70,
+        summary.get("executive_summary", "-"), "",
+        f"Total temuan : {summary.get('total_findings', 0)}",
+        f"🔴 Kritikal   : {summary.get('kritikal', 0)}",
+        f"🟡 Minor      : {summary.get('minor', 0)}",
+        f"🟢 Sesuai     : {summary.get('ok', 0)}",
+        "", "=" * 70,
+        "DETAIL TEMUAN (AI AUDIT)",
+        "=" * 70,
+    ]
+
+    for sev in ["kritikal", "minor", "ok", "info"]:
+        group = [f for f in result.get("findings", []) if f.get("severity") == sev]
+        if not group:
+            continue
+        lines.append(f"\n{'─'*60}")
+        lines.append(f"[{sev.upper()}] — {len(group)} temuan")
+        lines.append(f"{'─'*60}")
+        for f in group:
+            lines += [
+                f"",
+                f"[{f.get('id','')}] {f.get('title','')}",
+                f"  Kategori  : {f.get('category','')}",
+                f"  Lokasi    : {f.get('page_hint','')}",
+                f"  Detail    :",
+            ]
+            for dl in f.get("detail", "").split("\n"):
+                lines.append(f"    {dl}")
+
+    lines += ["", "=" * 70, "PENGECEKAN LOKAL (OTOMATIS)", "=" * 70]
+    for f in local_result.get("findings", []):
+        lines += [
+            f"",
+            f"[{f.get('id','')}] [{f.get('severity','').upper()}] {f.get('title','')}",
+            f"  {f.get('detail','')}",
+        ]
+
+    lines += ["", "=" * 70, "PENGECEKAN MATEMATIKA", "=" * 70]
+    for f in math_result.get("findings", []):
+        lines += [
+            f"",
+            f"[{f.get('id','')}] [{f.get('severity','').upper()}] {f.get('title','')}",
+            f"  Formula : {f.get('formula','-')}",
+            f"  Detail  : {f.get('detail','')}",
+        ]
+
+    lines += [
+        "", "=" * 70,
+        f"CekLaporan v7.0 · KJPP SRR · Powered by Claude AI ({MODEL})",
+        "=" * 70,
+    ]
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════
 # HELPER: RENDER UI
 # ══════════════════════════════════════════════
 
 def render_finding_card(f: dict):
     sev   = f.get("severity", "info")
     cfg   = SEVERITY_CONFIG.get(sev, SEVERITY_CONFIG["info"])
-    color = cfg["color"]
-    bg    = cfg["bg"]
-    cat   = f.get("category", "")
     prop  = f.get("property", "")
-    title = f.get("title", "")
-    detail= f.get("detail", "")
-    hint  = f.get("page_hint", "")
-    fid   = f.get("id", "")
     prop_tag = f' &nbsp;·&nbsp; <span style="color:#1e6fbf;">📌 {prop}</span>' if prop else ""
     st.markdown(f"""
-<div style="background:{bg};border:1px solid {color}40;border-left:4px solid {color};
+<div style="background:{cfg['bg']};border:1px solid {cfg['color']}40;border-left:4px solid {cfg['color']};
             border-radius:8px;padding:14px 16px;margin-bottom:10px;">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <span style="background:{color}22;color:{color};border:1px solid {color};
+        <span style="background:{cfg['color']}22;color:{cfg['color']};border:1px solid {cfg['color']};
                      font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;
-                     text-transform:uppercase;letter-spacing:.5px;">{cfg["emoji"]} {sev}</span>
-        <span style="color:#666;font-size:11px;font-family:monospace;">{cat}{prop_tag}</span>
-        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">{fid} &nbsp; {hint}</span>
+                     text-transform:uppercase;">{cfg['emoji']} {sev}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;">{f.get('category','')}{prop_tag}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">
+            {f.get('id','')} &nbsp; {f.get('page_hint','')}</span>
     </div>
-    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{title}</div>
+    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{f.get('title','')}</div>
     <div style="font-size:12px;color:#444;font-family:monospace;background:#ffffff;
-                padding:8px 12px;border-radius:6px;line-height:1.6;
-                border:1px solid #e0e0e0;">{detail}</div>
+                padding:8px 12px;border-radius:6px;line-height:1.6;border:1px solid #e0e0e0;
+                white-space:pre-line;">{f.get('detail','')}</div>
 </div>""", unsafe_allow_html=True)
 
 
@@ -1218,139 +1582,67 @@ def render_summary_cards(s: dict):
 </div>""", unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════
-# HELPER: DOCUMENT PREVIEW
-# ══════════════════════════════════════════════
-
 def extract_keywords(finding: dict) -> list:
-    """Ekstrak kata kunci pencarian dari sebuah finding."""
-    keywords = []
-    detail = finding.get("detail", "")
-    title  = finding.get("title", "")
-
-    # Ekstrak angka besar (nilai Rp/USD) dari detail dan title
-    for pat in [
-        r"Rp\s*([\d][.\d,]+)",
-        r"US\$\s*([\d][.\d,]+)",
-        r"([\d]{3}\.[\d]{3}\.[\d]{3})",  # format angka seperti 221.159.000
-    ]:
-        for m in re.findall(pat, detail + " " + title, re.IGNORECASE):
+    keywords, detail, title = [], finding.get("detail",""), finding.get("title","")
+    for pat in [r"Rp\s*([\d][.\d,]+)", r"US\$\s*([\d][.\d,]+)",
+                r"([\d]{3}\.[\d]{3}\.[\d]{3})"]:
+        for m in re.findall(pat, detail+" "+title, re.IGNORECASE):
             cleaned = m.strip().rstrip(".,")
-            if cleaned:
-                keywords.append(cleaned)
-
-    # Ekstrak kata kunci spesifik: tanggal, nomor sertifikat, nama unik
+            if cleaned: keywords.append(cleaned)
     for pat in [
         r"\d{1,2}\s+(?:Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember)\s+\d{4}",
-        r"No\.\s+[\w\-/]+",
-        r"SHGB?\s+No[\.\s]+\d+",
-        r"[A-Z]{2,}\s+No[\.\s]+[\d/]+",
+        r"No\.\s+[\w\-/]+", r"SHGB?\s+No[\.\s]+\d+",
     ]:
-        for m in re.findall(pat, detail + " " + title, re.IGNORECASE):
-            if len(m) > 4:
-                keywords.append(m.strip())
-
-    # Ekstrak teks dalam tanda kutip (kata/frasa spesifik yang dikutip)
-    for m in re.findall(r'[\u2018\u2019"](\w[\w\s\-.]{2,38}\w)[\u2018\u2019\u201d"]', detail):
-        keywords.append(m.strip())
-
-    # Deduplicate, prioritaskan yang lebih panjang
-    seen = set()
-    result = []
+        for m in re.findall(pat, detail+" "+title, re.IGNORECASE):
+            if len(m) > 4: keywords.append(m.strip())
+    seen, result = set(), []
     for kw in sorted(keywords, key=len, reverse=True):
-        norm = kw.lower().replace(" ", "")
+        norm = kw.lower().replace(" ","")
         if norm not in seen and len(kw) >= 3:
             seen.add(norm)
             result.append(kw)
-
-    return result[:8]  # max 8 keywords
+    return result[:8]
 
 
 def parse_page_hints(page_hint: str) -> list:
-    """
-    Parse page_hint string menjadi list nomor halaman (sebagai string).
-    Menangani: angka arab, romawi, range (1-8), multiple hints.
-    Contoh: 'Hal. x vs Hal. xi' -> ['10', '11']
-            'Hal. 1-8' -> ['1','2','3','4','5','6','7','8']
-    """
-    if not page_hint:
-        return []
-
-    romawi_map = {
-        "i":1,"ii":2,"iii":3,"iv":4,"v":5,"vi":6,"vii":7,
-        "viii":8,"ix":9,"x":10,"xi":11,"xii":12,"xiii":13,
-        "xiv":14,"xv":15,"xvi":16,"xvii":17,"xviii":18,"xix":19,"xx":20
-    }
+    if not page_hint: return []
+    romawi_map = {"i":1,"ii":2,"iii":3,"iv":4,"v":5,"vi":6,"vii":7,
+                  "viii":8,"ix":9,"x":10,"xi":11,"xii":12,"xiii":13,
+                  "xiv":14,"xv":15,"xvi":16,"xvii":17,"xviii":18,"xix":19,"xx":20}
     pages = []
-
-    # Cari semua "Hal. X" atau "Hal X" (angka arab / romawi / range)
     for m in re.finditer(r'(?:hal|halaman|page)[\.\s]+([^\s,;()vs]+)', page_hint, re.IGNORECASE):
         raw = m.group(1).strip().lower().rstrip(".,)")
-        if raw in romawi_map:
-            pages.append(str(romawi_map[raw]))
-        elif raw.isdigit():
-            pages.append(raw)
+        if raw in romawi_map: pages.append(str(romawi_map[raw]))
+        elif raw.isdigit(): pages.append(raw)
         else:
-            rng = re.match(r'(\d+)[-\u2013](\d+)', raw)
+            rng = re.match(r'(\d+)[-–](\d+)', raw)
             if rng:
                 s, e = int(rng.group(1)), int(rng.group(2))
-                pages.extend([str(i) for i in range(s, min(e + 1, s + 15))])
-
-    # Scan teks untuk romawi standalone (mis: "vs Hal. xi (kesimpulan)")
+                pages.extend([str(i) for i in range(s, min(e+1, s+15))])
     for rn, rv in romawi_map.items():
         if re.search(r'\b' + rn + r'\b', page_hint, re.IGNORECASE):
             val = str(rv)
-            if val not in pages:
-                pages.append(val)
-
-    # Range numerik standalone: "1-8" atau "1–8"
-    for rng in re.finditer(r'\b(\d+)[-\u2013](\d+)\b', page_hint):
-        s, e = int(rng.group(1)), int(rng.group(2))
-        for i in range(s, min(e + 1, s + 15)):
-            val = str(i)
-            if val not in pages:
-                pages.append(val)
-
+            if val not in pages: pages.append(val)
     return list(dict.fromkeys(pages))[:12]
 
 
 def find_pages_for_finding(finding: dict, all_pages: list) -> list:
-    """
-    Cari halaman-halaman yang relevan dengan sebuah finding.
-    Kembalikan list dict: {page_num, text, matches, score}
-    """
-    if not all_pages:
-        return []
-
-    keywords = extract_keywords(finding)
+    if not all_pages: return []
+    keywords   = extract_keywords(finding)
     hint_pages = parse_page_hints(finding.get("page_hint", ""))
-    results = []
-
+    results    = []
+    romawi_map = {"i":1,"ii":2,"iii":3,"iv":4,"v":5,"vi":6,"vii":7,
+                  "viii":8,"ix":9,"x":10,"xi":11,"xii":12,"xiii":13,
+                  "xiv":14,"xv":15,"xvi":16,"xvii":17,"xviii":18,"xix":19,"xx":20}
     for page_num, page_text in enumerate(all_pages, start=1):
-        if not page_text or not page_text.strip():
-            continue
-
+        if not page_text or not page_text.strip(): continue
         score = 0
         matched_kws = []
-
-        # Bonus jika nomor halaman sesuai hint
-        page_num_str = str(page_num)
-        # Konversi romawi sederhana
-        romawi_map = {"i":1,"ii":2,"iii":3,"iv":4,"v":5,"vi":6,"vii":7,
-                      "viii":8,"ix":9,"x":10,"xi":11,"xii":12,"xiii":13,
-                      "xiv":14,"xv":15,"xvi":16,"xvii":17,"xviii":18,"xix":19,"xx":20}
         for hp in hint_pages:
-            hp_lower = hp.lower()
-            if hp == page_num_str:
-                score += 30
-            elif hp_lower in romawi_map and romawi_map[hp_lower] == page_num:
-                score += 30
-
-        # Score berdasarkan keyword match
+            if hp == str(page_num): score += 30
+            elif hp.lower() in romawi_map and romawi_map[hp.lower()] == page_num: score += 30
         page_lower = page_text.lower()
         for kw in keywords:
-            kw_lower = kw.lower().replace(".", r"\.")
-            # Hitung kemunculan
             try:
                 count = len(re.findall(re.escape(kw.lower()), page_lower))
             except re.error:
@@ -1358,44 +1650,26 @@ def find_pages_for_finding(finding: dict, all_pages: list) -> list:
             if count > 0:
                 score += min(count * 10, 30)
                 matched_kws.append(kw)
-
         if score > 0:
             results.append({
-                "page_num":   page_num,
-                "text":       page_text,
-                "matches":    matched_kws,
-                "score":      score,
-                "hint_match": any(
-                    hp == str(page_num) or
+                "page_num": page_num, "text": page_text,
+                "matches": matched_kws, "score": score,
+                "hint_match": any(hp == str(page_num) or
                     (hp.lower() in romawi_map and romawi_map[hp.lower()] == page_num)
-                    for hp in hint_pages
-                ),
+                    for hp in hint_pages),
             })
-
-    # Urutkan: hint_match dulu, lalu score tertinggi
     results.sort(key=lambda x: (x["hint_match"], x["score"]), reverse=True)
-    return results[:5]  # max 5 halaman terrelevant
+    return results[:5]
 
 
 def highlight_keywords_in_text(text: str, keywords: list) -> str:
-    """Highlight keyword di teks dengan tag HTML mark."""
-    if not keywords:
-        return text
-    # Escape HTML dahulu
-    escaped = (text
-               .replace("&", "&amp;")
-               .replace("<", "&lt;")
-               .replace(">", "&gt;"))
-    # Highlight per keyword (terpanjang dulu untuk hindari double-highlight)
+    escaped = text.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
     for kw in sorted(keywords, key=len, reverse=True):
-        if not kw or len(kw) < 3:
-            continue
+        if not kw or len(kw) < 3: continue
         try:
-            pattern = re.compile(re.escape(kw), re.IGNORECASE)
-            escaped = pattern.sub(
+            escaped = re.compile(re.escape(kw), re.IGNORECASE).sub(
                 lambda m: f'<mark style="background:#fef08a;color:#1a1a2e;'
-                          f'padding:0 2px;border-radius:2px;font-weight:700;">'
-                          f'{m.group()}</mark>',
+                          f'padding:0 2px;border-radius:2px;font-weight:700;">{m.group()}</mark>',
                 escaped
             )
         except re.error:
@@ -1404,95 +1678,212 @@ def highlight_keywords_in_text(text: str, keywords: list) -> str:
 
 
 def render_finding_with_preview(finding: dict, all_pages: list, card_key: str):
-    """
-    Render finding card + tombol preview dokumen.
-    all_pages: list halaman teks dari dokumen.
-    card_key: unique key untuk Streamlit widgets.
-    """
     sev   = finding.get("severity", "info")
     cfg   = SEVERITY_CONFIG.get(sev, SEVERITY_CONFIG["info"])
-    color = cfg["color"]
-    bg    = cfg["bg"]
-    cat   = finding.get("category", "")
     prop  = finding.get("property", "")
-    title = finding.get("title", "")
-    detail= finding.get("detail", "")
-    hint  = finding.get("page_hint", "")
-    fid   = finding.get("id", "")
     prop_tag = f' &nbsp;·&nbsp; <span style="color:#1e6fbf;">📌 {prop}</span>' if prop else ""
-
-    # Render card utama
     st.markdown(f"""
-<div style="background:{bg};border:1px solid {color}40;border-left:4px solid {color};
+<div style="background:{cfg['bg']};border:1px solid {cfg['color']}40;border-left:4px solid {cfg['color']};
             border-radius:8px;padding:14px 16px;margin-bottom:4px;">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <span style="background:{color}22;color:{color};border:1px solid {color};
+        <span style="background:{cfg['color']}22;color:{cfg['color']};border:1px solid {cfg['color']};
                      font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;
-                     text-transform:uppercase;letter-spacing:.5px;">{cfg["emoji"]} {sev}</span>
-        <span style="color:#666;font-size:11px;font-family:monospace;">{cat}{prop_tag}</span>
-        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">{fid} &nbsp; {hint}</span>
+                     text-transform:uppercase;">{cfg['emoji']} {sev}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;">
+            {finding.get('category','')}{prop_tag}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">
+            {finding.get('id','')} &nbsp; {finding.get('page_hint','')}</span>
     </div>
-    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{title}</div>
+    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{finding.get('title','')}</div>
     <div style="font-size:12px;color:#444;font-family:monospace;background:#ffffff;
-                padding:8px 12px;border-radius:6px;line-height:1.6;
-                border:1px solid #e0e0e0;">{detail}</div>
+                padding:8px 12px;border-radius:6px;line-height:1.6;border:1px solid #e0e0e0;
+                white-space:pre-line;">{finding.get('detail','')}</div>
 </div>""", unsafe_allow_html=True)
 
-    # Tombol preview — hanya tampil jika ada halaman dokumen
     if all_pages:
-        keywords = extract_keywords(finding)
-        btn_label = f"📄 Lihat Preview Dokumen"
-        if hint:
-            btn_label += f" ({hint})"
+        keywords      = extract_keywords(finding)
+        btn_label     = f"📄 Lihat Preview Dokumen"
+        if finding.get("page_hint"):
+            btn_label += f" ({finding['page_hint']})"
         with st.expander(btn_label, expanded=False):
             relevant_pages = find_pages_for_finding(finding, all_pages)
             if not relevant_pages:
-                st.caption("⚠️ Tidak ada halaman yang cocok ditemukan untuk temuan ini.")
+                st.caption("⚠️ Tidak ada halaman yang cocok ditemukan.")
             else:
                 st.caption(
                     f"Ditemukan **{len(relevant_pages)}** halaman relevan · "
                     f"Keywords: {', '.join(f'`{k}`' for k in keywords[:4])}"
                 )
                 for pr in relevant_pages:
-                    badge = "📍 sesuai hint" if pr["hint_match"] else f"skor: {pr['score']}"
-                    kw_str = ", ".join(f'`{k}`' for k in pr["matches"][:4]) if pr["matches"] else "—"
-                    with st.container():
-                        st.markdown(
-                            f'<div style="display:flex;align-items:center;gap:8px;margin:8px 0 4px;">' +
-                            f'<span style="background:#1a9e67;color:#fff;font-size:10px;font-weight:700;' +
-                            f'padding:2px 8px;border-radius:4px;font-family:monospace;">HAL. {pr["page_num"]}</span>' +
-                            f'<span style="font-size:11px;color:#6b7280;font-family:monospace;">{badge}</span>' +
-                            f'<span style="font-size:11px;color:#6b7280;">Keywords ditemukan: {kw_str}</span>' +
-                            f'</div>',
-                            unsafe_allow_html=True
-                        )
-                        # Trim text ke sekitar 1200 karakter, fokus di area keyword
-                        page_text = pr["text"]
-                        if len(page_text) > 1500:
-                            # Cari posisi keyword pertama lalu ambil window
-                            best_pos = 0
-                            for kw in pr["matches"][:3]:
-                                pos = page_text.lower().find(kw.lower())
-                                if pos > 0:
-                                    best_pos = max(0, pos - 200)
-                                    break
-                            page_text = page_text[best_pos:best_pos + 1500]
-                            if best_pos > 0:
-                                page_text = "…" + page_text
-                            if best_pos + 1500 < len(pr["text"]):
-                                page_text = page_text + "…"
-
-                        highlighted = highlight_keywords_in_text(page_text, keywords)
-                        st.markdown(
-                            f'<div style="background:#f8fafb;border:1px solid #dde3ea;' +
-                            f'border-radius:6px;padding:12px 14px;font-family:monospace;' +
-                            f'font-size:12px;line-height:1.7;color:#374151;' +
-                            f'white-space:pre-wrap;word-break:break-word;max-height:350px;' +
-                            f'overflow-y:auto;">{highlighted}</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown("<br>", unsafe_allow_html=True)
+                    badge   = "📍 sesuai hint" if pr["hint_match"] else f"skor: {pr['score']}"
+                    kw_str  = ", ".join(f'`{k}`' for k in pr["matches"][:4]) if pr["matches"] else "—"
+                    st.markdown(
+                        f'<div style="display:flex;align-items:center;gap:8px;margin:8px 0 4px;">'
+                        f'<span style="background:#1a9e67;color:#fff;font-size:10px;font-weight:700;'
+                        f'padding:2px 8px;border-radius:4px;font-family:monospace;">HAL. {pr["page_num"]}</span>'
+                        f'<span style="font-size:11px;color:#6b7280;font-family:monospace;">{badge}</span>'
+                        f'<span style="font-size:11px;color:#6b7280;">Keywords: {kw_str}</span>'
+                        f'</div>', unsafe_allow_html=True
+                    )
+                    page_text = pr["text"]
+                    if len(page_text) > 1500:
+                        best_pos = 0
+                        for kw in pr["matches"][:3]:
+                            pos = page_text.lower().find(kw.lower())
+                            if pos > 0:
+                                best_pos = max(0, pos - 200)
+                                break
+                        page_text = ("…" if best_pos > 0 else "") + page_text[best_pos:best_pos+1500]
+                        if best_pos + 1500 < len(pr["text"]):
+                            page_text += "…"
+                    highlighted = highlight_keywords_in_text(page_text, keywords)
+                    st.markdown(
+                        f'<div style="background:#f8fafb;border:1px solid #dde3ea;border-radius:6px;'
+                        f'padding:12px 14px;font-family:monospace;font-size:12px;line-height:1.7;'
+                        f'color:#374151;white-space:pre-wrap;word-break:break-word;max-height:350px;'
+                        f'overflow-y:auto;">{highlighted}</div>', unsafe_allow_html=True
+                    )
+                    st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("<div style='margin-bottom:8px;'></div>", unsafe_allow_html=True)
+
+
+def render_excel_comparison(comparison: dict):
+    """Render hasil komparasi dokumen vs Excel."""
+    if not comparison:
+        return
+    st.markdown(f"""
+<div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:10px;
+            padding:14px 16px;margin-bottom:16px;font-family:monospace;font-size:13px;">
+    <b>📊 Hasil Komparasi Angka</b><br>
+    <span style="color:#374151;">{comparison.get('summary','')}</span>
+</div>""", unsafe_allow_html=True)
+
+    not_found = comparison.get("not_found", [])
+    if not_found:
+        with st.expander(f"❓ {len(not_found)} angka di laporan TIDAK ditemukan di Excel", expanded=True):
+            st.caption("Angka-angka ini ada di laporan tetapi tidak ada padanannya di lembar kerja:")
+            for nf in not_found[:30]:
+                ctx = nf["doc_context"][:120] + ("…" if len(nf["doc_context"]) > 120 else "")
+                st.markdown(f"""
+<div style="background:#fff;border:1px solid #7c3aed40;border-left:3px solid #7c3aed;
+            border-radius:6px;padding:8px 12px;margin-bottom:6px;font-family:monospace;font-size:12px;">
+    <span style="color:#7c3aed;font-weight:700;">{nf['doc_raw']}</span>
+    &nbsp;→&nbsp; <span style="color:#6b7280;">{ctx}</span>
+</div>""", unsafe_allow_html=True)
+
+    matches = comparison.get("matches", [])
+    if matches:
+        with st.expander(f"✅ {len(matches)} angka cocok antara laporan dan Excel"):
+            for m in matches[:20]:
+                st.markdown(
+                    f'<div style="font-family:monospace;font-size:11px;color:#374151;'
+                    f'padding:4px 0;border-bottom:1px solid #f0f0f0;">'
+                    f'<span style="color:#1a9e67;font-weight:700;">{m["doc_raw"]}</span>'
+                    f' = <span style="color:#1e6fbf;">{m["excel_label"]}</span>'
+                    f' [{m["excel_sheet"]} {m["excel_cell"]}]'
+                    f'</div>', unsafe_allow_html=True
+                )
+
+
+def render_math_section(math_result: dict):
+    """Render panel pengecekan matematika."""
+    ext   = math_result.get("extracted", {})
+    mf    = math_result.get("findings", [])
+    n_comp = len(ext.get("components", {}))
+    kurs_str  = f"1 USD = Rp {ext['kurs_bi']:,.0f}" if ext.get("kurs_bi") else "tidak terdeteksi"
+    total_str = f"Rp {ext['total_rp']:,.0f}" if ext.get("total_rp") else "tidak terdeteksi"
+
+    st.markdown(f"""
+<div style="background:#f8fafb;border:1px solid #dde3ea;border-radius:8px;
+            padding:10px 14px;margin-bottom:14px;font-family:monospace;font-size:12px;
+            display:flex;gap:24px;flex-wrap:wrap;">
+    <span>🏷️ <b>Komponen</b>: {n_comp}</span>
+    <span>💱 <b>Kurs BI</b>: {kurs_str}</span>
+    <span>📊 <b>Total Resume</b>: {total_str}</span>
+    <span>✅ {math_result['n_ok']} &nbsp; 🔴 {math_result['n_kritikal']} &nbsp; 🟡 {math_result['n_minor']}</span>
+</div>""", unsafe_allow_html=True)
+
+    if n_comp > 0:
+        with st.expander(f"📋 Detail Komponen Resume ({n_comp} item)", expanded=True):
+            rows_html = ""
+            for kode, comp in ext["components"].items():
+                usd_str = f"{comp['usd']:,.0f}" if comp.get("usd") else "-"
+                exp_usd = ""
+                if ext.get("kurs_bi") and comp.get("usd"):
+                    e = comp["rp"] / ext["kurs_bi"]
+                    diff_pct = abs(e - comp["usd"]) / e if e > 0 else 0
+                    icon = "✅" if diff_pct <= 0.01 else "⚠️"
+                    exp_usd = f'<span style="color:#6b7280;font-size:10px;">{icon} exp:{round(e):,}</span>'
+                rows_html += (
+                    f'<tr><td style="padding:6px 10px;font-weight:700;color:#1e6fbf;">{kode}</td>'
+                    f'<td style="padding:6px 10px;">{comp["nama"]}</td>'
+                    f'<td style="padding:6px 10px;text-align:right;font-family:monospace;">'
+                    f'Rp {comp["rp"]:,.0f}</td>'
+                    f'<td style="padding:6px 10px;text-align:right;font-family:monospace;">'
+                    f'USD {usd_str} {exp_usd}</td></tr>'
+                )
+            if ext.get("total_rp"):
+                rows_html += (
+                    f'<tr style="background:#f0f9f4;font-weight:800;border-top:2px solid #1a9e67;">'
+                    f'<td colspan="2" style="padding:8px 10px;">TOTAL</td>'
+                    f'<td style="padding:8px 10px;text-align:right;font-family:monospace;color:#1a9e67;">'
+                    f'Rp {ext["total_rp"]:,.0f}</td>'
+                    f'<td style="padding:8px 10px;text-align:right;font-family:monospace;color:#1a9e67;">'
+                    f'USD {ext["total_usd"]:,.0f if ext.get("total_usd") else "-"}</td></tr>'
+                )
+            st.markdown(f"""
+<table style="width:100%;border-collapse:collapse;font-size:13px;
+              background:#fff;border:1px solid #dde3ea;border-radius:8px;overflow:hidden;">
+<thead><tr style="background:#f8fafb;border-bottom:2px solid #dde3ea;">
+<th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;width:40px;">Kode</th>
+<th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;">Uraian</th>
+<th style="padding:8px 10px;text-align:right;font-size:11px;color:#6b7280;">Nilai Rp</th>
+<th style="padding:8px 10px;text-align:right;font-size:11px;color:#6b7280;">Nilai USD</th>
+</tr></thead>
+<tbody>{rows_html}</tbody>
+</table>""", unsafe_allow_html=True)
+
+    math_grouped = {}
+    for f in mf:
+        math_grouped.setdefault(f["severity"], []).append(f)
+    for sev in ["kritikal", "minor", "ok", "info"]:
+        grp = math_grouped.get(sev, [])
+        if not grp: continue
+        cfg = SEVERITY_CONFIG[sev]
+        st.markdown(
+            f'<div style="font-size:11px;font-family:monospace;color:#6b7280;'
+            f'text-transform:uppercase;letter-spacing:1.5px;margin:12px 0 8px;">'
+            f'{cfg["emoji"]} {sev.upper()} ({len(grp)})'
+            f'<span style="display:inline-block;height:1px;background:#dde3ea;'
+            f'width:160px;margin-left:10px;vertical-align:middle;"></span></div>',
+            unsafe_allow_html=True
+        )
+        for f in grp:
+            formula_html = ""
+            if f.get("formula") and f["formula"] != "-":
+                formula_html = (
+                    f'<div style="margin-top:6px;font-size:11px;background:#f0f4ff;'
+                    f'border:1px solid #bfcfee;border-radius:4px;padding:5px 10px;'
+                    f'color:#1e6fbf;font-family:monospace;">📐 {f["formula"]}</div>'
+                )
+            sc = SEVERITY_CONFIG.get(f["severity"], SEVERITY_CONFIG["info"])
+            st.markdown(f"""
+<div style="background:{sc['bg']};border:1px solid {sc['color']}40;
+            border-left:4px solid {sc['color']};border-radius:8px;padding:12px 16px;margin-bottom:8px;">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="background:{sc['color']}22;color:{sc['color']};border:1px solid {sc['color']};
+                     font-size:10px;font-weight:700;padding:2px 8px;border-radius:4px;
+                     text-transform:uppercase;">{sc['emoji']} {f['severity']}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;">{f.get('category','')}</span>
+        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">
+            {f.get('id','')} &nbsp; {f.get('page_hint','')}</span>
+    </div>
+    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{f['title']}</div>
+    <div style="font-size:12px;color:#444;font-family:monospace;white-space:pre-line;
+                background:#ffffff;padding:8px 12px;border-radius:6px;
+                border:1px solid #e0e0e0;">{f['detail']}</div>
+    {formula_html}
+</div>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════
@@ -1501,7 +1892,7 @@ def render_finding_with_preview(finding: dict, all_pages: list, card_key: str):
 
 def main():
     st.set_page_config(
-        page_title="CekLaporan v6 — KJPP SRR",
+        page_title="CekLaporan v7 — KJPP SRR",
         page_icon="📋",
         layout="wide",
         initial_sidebar_state="expanded",
@@ -1509,37 +1900,31 @@ def main():
 
     st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
-    html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
-    .stApp { background: #f4f6f9; color: #1a1a2e; }
-    section[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #dde3ea; }
-    section[data-testid="stSidebar"] * { color: #1a1a2e !important; }
-    .block-container { padding-top: 2rem; max-width: 1100px; }
-    div[data-testid="stFileUploader"] { border: 2px dashed #c9d2dc; border-radius: 10px; padding: 10px; background: #fff; }
-    .stButton > button {
-        background: #1a9e67; color: #fff; font-weight: 800;
-        border: none; border-radius: 8px; padding: 10px 24px;
-        font-family: 'Sora', sans-serif; transition: all .2s;
-    }
-    .stButton > button:hover { background: #147a50; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(26,158,103,0.3); }
-    .stButton > button:disabled { background: #e5e7eb; color: #9ca3af; }
-    .stTextInput input { background: #fff; color: #1a1a2e; border: 1px solid #dde3ea; border-radius: 6px; font-family: 'DM Mono', monospace; font-size: 13px; }
-    .stTextInput input:focus { border-color: #1a9e67 !important; box-shadow: 0 0 0 2px rgba(26,158,103,0.15) !important; }
-    .stSelectbox > div > div { background: #fff; color: #1a1a2e; border-color: #dde3ea; }
-    .stCheckbox label { font-size: 13px; color: #374151 !important; }
-    hr { border-color: #dde3ea; }
-    h1,h2,h3 { color: #1a1a2e !important; font-family: 'Sora', sans-serif !important; }
-    .stTabs [data-baseweb="tab-list"] { background: #fff; border-bottom: 2px solid #e5e7eb; border-radius: 8px 8px 0 0; }
-    .stTabs [data-baseweb="tab"] { color: #6b7280; font-size: 13px; font-weight: 600; }
-    .stTabs [aria-selected="true"] { color: #1a9e67 !important; border-bottom-color: #1a9e67 !important; }
-    div[data-testid="stExpander"] { background: #fff; border: 1px solid #dde3ea; border-radius: 8px; }
-    .stAlert { border-radius: 8px; }
-    [data-testid="stRadio"] label { color: #374151 !important; }
-    [data-testid="stCaption"] { color: #6b7280 !important; }
-    .stMarkdown p { color: #374151; }
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+html, body, [class*="css"] { font-family: 'Sora', sans-serif; }
+.stApp { background: #f4f6f9; color: #1a1a2e; }
+section[data-testid="stSidebar"] { background: #ffffff; border-right: 1px solid #dde3ea; }
+section[data-testid="stSidebar"] * { color: #1a1a2e !important; }
+.block-container { padding-top: 2rem; max-width: 1100px; }
+div[data-testid="stFileUploader"] { border: 2px dashed #c9d2dc; border-radius: 10px; padding: 10px; background: #fff; }
+.stButton > button {
+    background: #1a9e67; color: #fff; font-weight: 800;
+    border: none; border-radius: 8px; padding: 10px 24px;
+    font-family: 'Sora', sans-serif; transition: all .2s;
+}
+.stButton > button:hover { background: #147a50; transform: translateY(-1px); }
+.stButton > button:disabled { background: #e5e7eb; color: #9ca3af; }
+.stTextInput input { background: #fff; border: 1px solid #dde3ea; border-radius: 6px; font-family: 'DM Mono', monospace; }
+.stSelectbox > div > div { background: #fff; border-color: #dde3ea; }
+hr { border-color: #dde3ea; }
+h1,h2,h3 { color: #1a1a2e !important; font-family: 'Sora', sans-serif !important; }
+.stTabs [data-baseweb="tab-list"] { background: #fff; border-bottom: 2px solid #e5e7eb; border-radius: 8px 8px 0 0; }
+.stTabs [data-baseweb="tab"] { color: #6b7280; font-size: 13px; font-weight: 600; }
+.stTabs [aria-selected="true"] { color: #1a9e67 !important; border-bottom-color: #1a9e67 !important; }
+div[data-testid="stExpander"] { background: #fff; border: 1px solid #dde3ea; border-radius: 8px; }
 </style>""", unsafe_allow_html=True)
 
-    # ── HEADER ──
+    # ── HEADER ──────────────────────────────────────────────────────────────
     st.markdown("""
 <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
     <div style="background:#1a9e67;border-radius:10px;width:40px;height:40px;
@@ -1548,7 +1933,7 @@ def main():
         <h1 style="margin:0;font-size:24px;font-weight:800;letter-spacing:-0.5px;color:#1a1a2e;">
             Cek<span style="color:#1a9e67;">Laporan</span>
             <span style="font-size:12px;background:#edfaf4;color:#1a9e67;border:1px solid #1a9e67;
-                         padding:2px 10px;border-radius:20px;font-weight:600;margin-left:8px;">v6.0 — AI Powered</span>
+                         padding:2px 10px;border-radius:20px;font-weight:600;margin-left:8px;">v7.0 — AI + Excel</span>
         </h1>
         <p style="margin:0;color:#6b7280;font-size:12px;font-family:'DM Mono',monospace;">
             KJPP Suwendho Rinaldy dan Rekan · Pengecekan Laporan Penilaian</p>
@@ -1556,49 +1941,43 @@ def main():
 </div>
 <hr style="border-color:#dde3ea;">""", unsafe_allow_html=True)
 
-    # ── KONEKSI GOOGLE SHEETS ──
+    # ── KONEKSI GOOGLE SHEETS ────────────────────────────────────────────────
     _, spreadsheet, gs_error = get_gsheet_client()
     gs_connected = spreadsheet is not None
-
-    # ── LOAD DATA ──
     data_laporan = load_data_laporan(spreadsheet)
     riwayat      = load_riwayat(spreadsheet)
 
-    # ════════════════════════════════
+    # ════════════════════════════════════════════════
     # SIDEBAR
-    # ════════════════════════════════
+    # ════════════════════════════════════════════════
     with st.sidebar:
-        # Status Google Sheets
         if gs_connected:
             st.markdown("""
 <div style="background:#edfaf4;border:1px solid #b2e8d0;border-radius:8px;
             padding:10px 12px;margin-bottom:12px;font-size:12px;">
-    🟢 <strong>Google Sheets</strong> terhubung<br>
-    <span style="color:#6b7280;font-size:11px;">Data tersimpan permanen</span>
+    🟢 <strong>Google Sheets</strong> terhubung
 </div>""", unsafe_allow_html=True)
         else:
-            error_detail = gs_error or "Secrets belum diisi"
             st.markdown(f"""
 <div style="background:#fff8e6;border:1px solid #f5e0a0;border-radius:8px;
             padding:10px 12px;margin-bottom:12px;font-size:12px;">
     🟡 <strong>Google Sheets</strong> tidak terkonfigurasi<br>
-    <span style="color:#6b7280;font-size:11px;">Data hanya tersimpan sementara (session)</span>
+    <span style="color:#6b7280;font-size:11px;">Data hanya tersimpan sementara</span>
 </div>""", unsafe_allow_html=True)
-            with st.expander("🔍 Lihat detail error", expanded=True):
-                st.code(error_detail, language="text")
+            with st.expander("🔍 Detail error", expanded=False):
+                st.code(gs_error or "Secrets belum diisi", language="text")
 
         st.markdown("### 🔑 Claude API Key")
         api_key = st.text_input(
-            "Masukkan API Key",
-            type="password",
+            "Masukkan API Key", type="password",
             placeholder="sk-ant-api03-...",
-            help="Dapatkan API Key di https://console.anthropic.com",
+            help="Dapatkan di https://console.anthropic.com",
         )
         if api_key:
             if api_key.startswith("sk-ant"):
                 st.success("✅ Format key valid")
             else:
-                st.error("❌ Format tidak valid (harus diawali sk-ant)")
+                st.error("❌ Harus diawali sk-ant")
 
         st.markdown("---")
         st.markdown("### ⚡ Mode Pengecekan")
@@ -1607,21 +1986,19 @@ def main():
 
         st.markdown("---")
         st.markdown("### ✅ Item yang Dicek")
-
-        # Pilih item berdasarkan mode
         _mode_key = MODE_CONFIG[mode_label]["key"]
         if _mode_key == "saham":
             _items_pool = CHECK_ITEMS_SAHAM
-            _unchecked = []
+            _unchecked  = []
         elif _mode_key == "fairness":
             _items_pool = CHECK_ITEMS_FAIRNESS
-            _unchecked = []
+            _unchecked  = []
         elif _mode_key == "aset":
             _items_pool = CHECK_ITEMS_ASET
-            _unchecked = ["Konsistensi nomor IMB/perizinan jika ada"]
+            _unchecked  = ["Konsistensi nomor IMB/perizinan jika ada"] if "Konsistensi nomor IMB/perizinan jika ada" in CHECK_ITEMS_ASET else []
         else:
-            _items_pool = CHECK_ITEMS_PROPERTI
-            _unchecked = ["Analisis Pasar & Data Pembanding", "Pendekatan & Metode Penilaian"]
+            _items_pool = CHECK_ITEMS_DEFAULT
+            _unchecked  = ["Analisis Pasar & Data Pembanding"]
 
         selected_items = []
         for item in _items_pool:
@@ -1632,17 +2009,11 @@ def main():
         st.markdown("---")
         st.markdown("### 📚 Referensi Laporan")
         laporan_names = list(data_laporan.keys())
-        selected_ref  = st.selectbox("Laporan Referensi", ["(Tidak ada)"] + laporan_names + ["+ Tambah Baru"])
-
+        selected_ref  = st.selectbox("Pilih referensi", ["(Tidak ada)"] + laporan_names + ["+ Tambah Baru"])
         if selected_ref not in ["(Tidak ada)", "+ Tambah Baru"] and selected_ref in data_laporan:
             with st.expander("Lihat referensi"):
-                ref_data = data_laporan[selected_ref]
-                if ref_data:
-                    for k, v in ref_data.items():
-                        st.write(f"• {k}: **{v}x**")
-                else:
-                    st.caption("Belum ada data referensi.")
-
+                for k, v in data_laporan[selected_ref].items():
+                    st.write(f"• {k}: **{v}x**")
         if selected_ref == "+ Tambah Baru":
             new_name = st.text_input("Nama laporan baru:")
             if st.button("Tambahkan") and new_name:
@@ -1653,31 +2024,59 @@ def main():
                 else:
                     st.warning("Nama sudah ada.")
 
-    # ════════════════════════════════
+    # ════════════════════════════════════════════════
     # TABS
-    # ════════════════════════════════
+    # ════════════════════════════════════════════════
     tab_audit, tab_search, tab_history, tab_ref = st.tabs([
         "🤖 AI Audit", "🔍 Pencarian Teks", "📜 Riwayat Audit", "📁 Kelola Referensi"
     ])
 
-    # ────────────────────────────────
+    # ────────────────────────────────────────────────
     # TAB 1: AI AUDIT
-    # ────────────────────────────────
+    # ────────────────────────────────────────────────
     with tab_audit:
-        st.markdown("#### 📁 Upload Laporan")
-        uploaded_pdfs  = st.file_uploader("File PDF",  type="pdf",  accept_multiple_files=True, key="pdf_audit")
-        uploaded_docxs = st.file_uploader("File DOCX", type="docx", accept_multiple_files=True, key="docx_audit")
-        all_files = (uploaded_pdfs or []) + (uploaded_docxs or [])
 
-        if all_files:
-            st.markdown(f"**{len(all_files)} file siap dianalisis:**")
-            for f in all_files:
-                icon = "📄" if f.name.endswith(".pdf") else "📝"
-                st.markdown(
-                    f'<span style="font-family:monospace;font-size:12px;color:#6b7280;">'
-                    f'{icon} {f.name} &nbsp;·&nbsp; {f.size//1024} KB</span>',
-                    unsafe_allow_html=True
+        # --- Upload Section ---
+        col_doc, col_xl = st.columns([3, 2])
+
+        with col_doc:
+            st.markdown("#### 📄 Upload Laporan (PDF/DOCX)")
+            uploaded_pdfs  = st.file_uploader("File PDF",  type="pdf",
+                accept_multiple_files=True, key="pdf_audit")
+            uploaded_docxs = st.file_uploader("File DOCX", type="docx",
+                accept_multiple_files=True, key="docx_audit")
+            all_files = (uploaded_pdfs or []) + (uploaded_docxs or [])
+            if all_files:
+                for f in all_files:
+                    icon = "📄" if f.name.endswith(".pdf") else "📝"
+                    st.markdown(
+                        f'<span style="font-family:monospace;font-size:12px;color:#6b7280;">'
+                        f'{icon} {f.name} · {f.size//1024} KB</span>',
+                        unsafe_allow_html=True
+                    )
+
+        with col_xl:
+            st.markdown("#### 📊 Upload Lembar Kerja (XLSX) — Opsional")
+            if not EXCEL_AVAILABLE:
+                st.warning("⚠️ openpyxl tidak tersedia. Install dengan: `pip install openpyxl`")
+                uploaded_xlsx = None
+            else:
+                uploaded_xlsx = st.file_uploader(
+                    "File XLSX (lembar kerja/workbook)",
+                    type=["xlsx", "xls"],
+                    accept_multiple_files=False,
+                    key="xlsx_audit",
+                    help="Jika diupload, angka di laporan akan dibandingkan dengan data Excel"
                 )
+                if uploaded_xlsx:
+                    st.markdown(
+                        f'<span style="font-family:monospace;font-size:12px;color:#1a9e67;">'
+                        f'📊 {uploaded_xlsx.name} · {uploaded_xlsx.size//1024} KB · '
+                        f'✅ Akan dikomparasi dengan laporan</span>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.info("💡 Upload lembar kerja XLSX untuk komparasi angka laporan vs workbook")
 
         st.markdown("---")
         col_run, col_info = st.columns([2, 5])
@@ -1686,17 +2085,19 @@ def main():
             run_btn = st.button("▶ Jalankan Analisis", disabled=run_disabled, use_container_width=True)
         with col_info:
             if not api_key:
-                st.info("💡 Masukkan API Key di sidebar untuk memulai.")
+                st.info("💡 Masukkan API Key di sidebar.")
             elif not all_files:
-                st.info("💡 Upload minimal satu file laporan.")
+                st.info("💡 Upload minimal satu file laporan (PDF atau DOCX).")
             elif not selected_items:
-                st.info("💡 Pilih minimal satu item pengecekan.")
+                st.info("💡 Pilih minimal satu item pengecekan di sidebar.")
             else:
-                st.success(f"✅ Siap: {len(all_files)} file · {len(selected_items)} item · mode **{mode_label}**")
+                excel_badge = f" · 📊 Excel: {uploaded_xlsx.name}" if uploaded_xlsx else ""
+                st.success(f"✅ Siap: {len(all_files)} file · {len(selected_items)} item · **{mode_label}**{excel_badge}")
 
         if run_btn:
             st.markdown("---")
 
+            # ── Step 1: Baca dokumen ──────────────────────────────────────────
             with st.status("📖 Membaca dokumen...", expanded=True) as status:
                 all_pages, file_info = [], []
                 for f in all_files:
@@ -1705,29 +2106,76 @@ def main():
                     all_pages.extend(pages)
                     file_info.append(f"{f.name} ({len(pages)} hal.)")
                 doc_text = pages_to_text(all_pages)
-                # Simpan pages ke session_state untuk preview dokumen
                 st.session_state["doc_pages"] = all_pages
                 status.update(label=f"✅ {len(all_pages)} halaman dibaca dari {len(all_files)} file", state="complete")
 
-            # ── CEK MATEMATIKA (berjalan sebelum Claude, instan) ──
+            # ── Step 2: Parse Excel (jika ada) ───────────────────────────────
+            excel_data   = None
+            excel_context = ""
+            comparison   = {}
+            if uploaded_xlsx:
+                with st.status("📊 Membaca lembar kerja Excel...", expanded=True) as status:
+                    st.write(f"Membaca **{uploaded_xlsx.name}**...")
+                    excel_data = parse_excel_workbook(uploaded_xlsx)
+                    if excel_data.get("error"):
+                        st.warning(f"⚠️ Gagal membaca Excel: {excel_data['error']}")
+                        excel_data = None
+                    else:
+                        n_sheets  = len(excel_data.get("sheets", []))
+                        n_numbers = len(excel_data.get("all_numbers", []))
+                        status.update(
+                            label=f"✅ Excel dibaca: {n_sheets} sheet, {n_numbers} nilai numerik",
+                            state="complete"
+                        )
+                        st.write(excel_data.get("summary", ""))
+                        excel_context = build_excel_context_for_prompt(excel_data)
+
+            # ── Step 3: Cek lokal (artefak, placeholder, penomoran) ──────────
+            with st.status("🔍 Pengecekan lokal (artefak & placeholder)...", expanded=False) as status:
+                local_result = cek_artefak_dan_placeholder(doc_text, _mode_key)
+                status.update(
+                    label=f"✅ Lokal: {local_result['n_kritikal']}🔴 {local_result['n_minor']}🟡",
+                    state="complete"
+                )
+
+            # ── Step 4: Cek matematika ───────────────────────────────────────
             math_result = cek_matematika_resume(doc_text)
 
-            with st.status("🧠 Claude sedang menganalisis laporan...", expanded=True) as status:
+            # ── Step 5: Komparasi Excel vs dokumen (lokal) ───────────────────
+            if excel_data:
+                with st.status("🔢 Komparasi angka dokumen vs Excel...", expanded=False) as status:
+                    doc_numbers = extract_doc_numbers(doc_text)
+                    comparison  = compare_doc_with_excel(doc_numbers, excel_data)
+                    n_miss      = len(comparison.get("not_found", []))
+                    n_match     = len(comparison.get("matches", []))
+                    status.update(
+                        label=f"✅ Komparasi: {n_match} cocok, {n_miss} tidak ditemukan di Excel",
+                        state="complete"
+                    )
+
+            # ── Step 6: Claude AI analisis ────────────────────────────────────
+            with st.status("🧠 Claude menganalisis laporan...", expanded=True) as status:
                 st.write(f"Model: `{MODEL}` · Mode: **{mode_label}**")
-                st.write(f"Teks dikirim: **{len(doc_text):,} karakter**")
+                st.write(f"Teks: **{len(doc_text):,}** karakter")
+                if excel_context:
+                    st.write(f"Excel context: **{len(excel_context):,}** karakter")
                 t_start = time.time()
                 try:
                     result, raw_text = call_claude(
-                        api_key, MODE_CONFIG[mode_label]["instruction"], selected_items, doc_text
+                        api_key,
+                        MODE_CONFIG[mode_label]["instruction"],
+                        selected_items,
+                        doc_text,
+                        excel_context,
                     )
                     elapsed = time.time() - t_start
-                    status.update(label=f"✅ Analisis selesai dalam {elapsed:.1f} detik", state="complete")
+                    status.update(label=f"✅ Analisis selesai dalam {elapsed:.1f}s", state="complete")
                 except Exception as e:
                     status.update(label="❌ Error", state="error")
                     st.error(f"**Error:** {e}")
                     st.stop()
 
-            # ── SIMPAN RIWAYAT ──
+            # ── Simpan riwayat ────────────────────────────────────────────────
             audit_id = datetime.now().strftime("%Y%m%d_%H%M%S")
             save_riwayat_row(spreadsheet, audit_id, {
                 "timestamp": datetime.now().strftime("%d %b %Y, %H:%M"),
@@ -1738,23 +2186,44 @@ def main():
             if gs_connected:
                 st.toast("💾 Riwayat tersimpan ke Google Sheets", icon="✅")
 
-            # ── TAMPILKAN HASIL ──
+            # ════════════════════════════════════════════════
+            # TAMPILKAN HASIL
+            # ════════════════════════════════════════════════
             st.markdown("---")
-            st.markdown(f"### 📊 Hasil Audit — `{result.get('report_type','').upper()}`")
-            st.caption(f"{' · '.join(file_info)} · {datetime.now().strftime('%d %b %Y, %H:%M')} · Mode: {mode_label}")
 
-            # Peringatan jika response terpotong
+            # Header hasil
+            report_type = result.get("report_type", "").upper()
+            st.markdown(f"### 📊 Hasil Audit — `{report_type}`")
+            st.caption(
+                f"{' · '.join(file_info)} · "
+                f"{datetime.now().strftime('%d %b %Y, %H:%M')} · "
+                f"Mode: {mode_label}"
+            )
+
             if result.get("_partial"):
                 st.warning(
                     "⚠️ **Response Claude terpotong** karena laporan terlalu panjang. "
-                    "Temuan yang berhasil dibaca tetap ditampilkan, namun mungkin tidak lengkap. "
-                    "Coba gunakan mode **Pre-Check** untuk laporan besar, atau kurangi jumlah halaman."
+                    "Temuan yang berhasil dibaca tetap ditampilkan. "
+                    "Coba mode **Pre-Check** untuk laporan besar."
                 )
 
-            render_summary_cards(result.get("summary", {}))
+            # Summary cards — gabung AI + lokal
+            summary = result.get("summary", {})
+            total_kritikal = summary.get("kritikal", 0) + local_result["n_kritikal"]
+            total_minor    = summary.get("minor", 0)    + local_result["n_minor"]
+            merged_summary = {
+                **summary,
+                "kritikal": total_kritikal,
+                "minor":    total_minor,
+                "overall_score": max(0, summary.get("overall_score", 80)
+                                     - local_result["n_kritikal"] * 5
+                                     - local_result["n_minor"] * 2),
+            }
+            render_summary_cards(merged_summary)
             st.markdown("<br>", unsafe_allow_html=True)
 
-            exec_sum = result.get("summary", {}).get("executive_summary", "")
+            # Executive summary
+            exec_sum = summary.get("executive_summary", "")
             if exec_sum:
                 st.markdown(f"""
 <div style="background:#fff;border:1px solid #dde3ea;border-radius:10px;padding:16px;
@@ -1764,53 +2233,91 @@ def main():
     <p style="font-size:14px;line-height:1.8;color:#374151;margin:0;">{exec_sum}</p>
 </div>""", unsafe_allow_html=True)
 
+            # Properties
             properties = result.get("properties", [])
             if len(properties) > 1:
                 st.markdown(f"""
-<div style="background:#eef4ff;border:1px solid #bfcfee;border-radius:10px;padding:14px;margin-bottom:16px;">
+<div style="background:#eef4ff;border:1px solid #bfcfee;border-radius:10px;
+            padding:14px;margin-bottom:16px;">
     <div style="font-size:10px;color:#1e6fbf;font-family:monospace;text-transform:uppercase;
-                letter-spacing:1.5px;margin-bottom:8px;">🏢 OBJEK PROPERTI TERDETEKSI ({len(properties)})</div>
+                letter-spacing:1.5px;margin-bottom:8px;">🏢 OBJEK TERDETEKSI ({len(properties)})</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;">
-        {"".join(f'<span style="background:#fff;color:#1e6fbf;border:1px solid #bfcfee;font-size:11px;font-family:monospace;padding:3px 10px;border-radius:12px;">{p}</span>' for p in properties)}
+        {"".join(f'<span style="background:#fff;color:#1e6fbf;border:1px solid #bfcfee;'
+                 f'font-size:11px;font-family:monospace;padding:3px 10px;border-radius:12px;">{p}</span>'
+                 for p in properties)}
     </div>
 </div>""", unsafe_allow_html=True)
 
-            findings = result.get("findings", [])
-            if findings:
-                filter_prop = None
-                if len(properties) > 1:
-                    sel = st.selectbox("Filter per objek:", ["Semua Objek"] + properties, key="prop_filter")
-                    if sel != "Semua Objek":
-                        filter_prop = sel
-                grouped = {}
-                for f in findings:
-                    if filter_prop and f.get("property") and f["property"] != filter_prop:
-                        continue
-                    grouped.setdefault(f.get("severity", "info"), []).append(f)
+            # ── Sub-tabs hasil ──────────────────────────────────────────────
+            rtab1, rtab2, rtab3, rtab4 = st.tabs([
+                "🔍 Temuan AI",
+                "🔎 Cek Lokal (Artefak & Placeholder)",
+                "🔢 Matematika",
+                "📊 Komparasi Excel",
+            ])
+
+            # ── Sub-tab 1: Temuan AI ──────────────────────────────────────
+            with rtab1:
+                findings = result.get("findings", [])
+                if findings:
+                    filter_prop = None
+                    if len(properties) > 1:
+                        sel = st.selectbox("Filter per objek:", ["Semua Objek"] + properties, key="prop_filter")
+                        if sel != "Semua Objek":
+                            filter_prop = sel
+                    grouped = {}
+                    for f in findings:
+                        if filter_prop and f.get("property") and f["property"] != filter_prop:
+                            continue
+                        grouped.setdefault(f.get("severity", "info"), []).append(f)
+
+                    for sev in ["kritikal", "minor", "ok", "info"]:
+                        group = grouped.get(sev, [])
+                        if not group: continue
+                        cfg = SEVERITY_CONFIG[sev]
+                        st.markdown(
+                            f'<div style="font-size:11px;font-family:monospace;color:#6b7280;'
+                            f'text-transform:uppercase;letter-spacing:1.5px;margin:16px 0 8px;">'
+                            f'{cfg["emoji"]} {sev.upper()} ({len(group)})'
+                            f'<span style="display:inline-block;height:1px;background:#dde3ea;'
+                            f'width:200px;margin-left:10px;vertical-align:middle;"></span></div>',
+                            unsafe_allow_html=True
+                        )
+                        for fi, f in enumerate(group):
+                            _pages = st.session_state.get("doc_pages", [])
+                            render_finding_with_preview(f, _pages, f"find_{sev}_{fi}_{f.get('id','x')}")
+                else:
+                    st.success("✅ Tidak ada temuan AI — laporan terlihat konsisten.")
+
+                with st.expander("🔧 Raw JSON Output (debug)"):
+                    st.code(raw_text, language="json")
+
+            # ── Sub-tab 2: Cek Lokal ──────────────────────────────────────
+            with rtab2:
+                st.markdown("""
+<div style="background:#fff8e6;border:1px solid #f5e0a0;border-radius:8px;
+            padding:10px 14px;margin-bottom:12px;font-size:12px;color:#7c5800;">
+    ⚡ Pengecekan ini berjalan secara lokal (tanpa AI) sehingga hasilnya instan dan deterministik.
+    Mencakup: placeholder belum diisi, penomoran ganda, inkonsistensi ejaan.
+</div>""", unsafe_allow_html=True)
+                lf = local_result.get("findings", [])
                 for sev in ["kritikal", "minor", "ok", "info"]:
-                    group = grouped.get(sev, [])
-                    if not group:
-                        continue
+                    group = [f for f in lf if f.get("severity") == sev]
+                    if not group: continue
                     cfg = SEVERITY_CONFIG[sev]
                     st.markdown(
                         f'<div style="font-size:11px;font-family:monospace;color:#6b7280;'
-                        f'text-transform:uppercase;letter-spacing:1.5px;margin:16px 0 8px;">'
+                        f'text-transform:uppercase;letter-spacing:1.5px;margin:12px 0 8px;">'
                         f'{cfg["emoji"]} {sev.upper()} ({len(group)})'
                         f'<span style="display:inline-block;height:1px;background:#dde3ea;'
-                        f'width:200px;margin-left:10px;vertical-align:middle;"></span></div>',
+                        f'width:160px;margin-left:10px;vertical-align:middle;"></span></div>',
                         unsafe_allow_html=True
                     )
-                    for fi, f in enumerate(group):
-                        card_key = f"find_{sev}_{fi}_{f.get('id','x')}"
-                        _pages = st.session_state.get("doc_pages", [])
-                        render_finding_with_preview(f, _pages, card_key)
-            else:
-                st.success("✅ Tidak ada temuan — laporan terlihat konsisten.")
+                    for f in group:
+                        render_finding_card(f)
 
-            # ── PANEL PENGECEKAN MATEMATIKA ──
-            _mk = MODE_CONFIG[mode_label]["key"]
-            if _mk in ("aset", "saham", "precheck", "deepaudit", "mappi", "multiobj", "fairness"):
-                st.markdown("---")
+            # ── Sub-tab 3: Matematika ─────────────────────────────────────
+            with rtab3:
                 st.markdown("""
 <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
     <span style="font-size:18px;">🔢</span>
@@ -1818,132 +2325,63 @@ def main():
     <span style="font-size:11px;background:#edfaf4;color:#1a9e67;border:1px solid #1a9e67;
                  padding:2px 8px;border-radius:12px;font-family:monospace;">Exact Calculation</span>
 </div>""", unsafe_allow_html=True)
+                render_math_section(math_result)
 
-                _ext = math_result.get("extracted", {})
-                _mf  = math_result.get("findings", [])
-
-                # Info strip: data yang berhasil diekstrak
-                kurs_str  = f"1 USD = Rp {_ext['kurs_bi']:,.0f}" if _ext.get("kurs_bi") else "tidak terdeteksi"
-                n_comp    = len(_ext.get("components", {}))
-                total_str = f"Rp {_ext['total_rp']:,.0f}" if _ext.get("total_rp") else "tidak terdeteksi"
-                st.markdown(f"""
-<div style="background:#f8fafb;border:1px solid #dde3ea;border-radius:8px;
-            padding:10px 14px;margin-bottom:14px;font-family:monospace;font-size:12px;
-            display:flex;gap:24px;flex-wrap:wrap;">
-    <span>🏷️ <b>Komponen</b>: {n_comp} item</span>
-    <span>💱 <b>Kurs BI</b>: {kurs_str}</span>
-    <span>📊 <b>Total Resume</b>: {total_str}</span>
-    <span>✅ <b>Sesuai</b>: {math_result["n_ok"]} &nbsp;
-          🔴 <b>Kritikal</b>: {math_result["n_kritikal"]} &nbsp;
-          🟡 <b>Minor</b>: {math_result["n_minor"]}</span>
+            # ── Sub-tab 4: Komparasi Excel ────────────────────────────────
+            with rtab4:
+                if not uploaded_xlsx:
+                    st.info(
+                        "📊 **Tidak ada lembar kerja yang diupload.**\n\n"
+                        "Upload file XLSX di atas bersamaan dengan PDF/DOCX laporan untuk "
+                        "membandingkan angka-angka di laporan dengan data di lembar kerja. "
+                        "Ini membantu mendeteksi:\n"
+                        "- Angka di laporan yang berbeda dari lembar kerja\n"
+                        "- Angka di laporan yang tidak ada di lembar kerja\n"
+                        "- Kesalahan pembulatan atau konversi"
+                    )
+                elif excel_data and excel_data.get("error"):
+                    st.error(f"❌ Gagal membaca Excel: {excel_data['error']}")
+                elif comparison:
+                    st.markdown(f"""
+<div style="background:#f5f3ff;border:1px solid #c4b5fd;border-radius:10px;
+            padding:14px 16px;margin-bottom:12px;">
+    <div style="font-size:10px;color:#7c3aed;font-family:monospace;text-transform:uppercase;
+                letter-spacing:1.5px;margin-bottom:8px;">📊 KOMPARASI LEMBAR KERJA VS LAPORAN</div>
+    <p style="margin:0;font-size:13px;color:#374151;">{comparison.get('summary','')}</p>
 </div>""", unsafe_allow_html=True)
 
-                # Tabel komponen jika terdeteksi
-                if n_comp > 0:
-                    with st.expander(f"📋 Detail Komponen Resume ({n_comp} item terdeteksi)", expanded=True):
-                        rows_html = ""
-                        for kode, comp in _ext["components"].items():
-                            usd_str = f"{comp['usd']:,.0f}" if comp.get("usd") else "-"
-                            exp_usd = ""
-                            if _ext.get("kurs_bi") and comp.get("usd"):
-                                e = comp["rp"] / _ext["kurs_bi"]
-                                diff_pct = abs(e - comp["usd"]) / e if e > 0 else 0
-                                icon = "✅" if diff_pct <= 0.01 else "⚠️"
-                                exp_usd = f'<span style="color:#6b7280;font-size:10px;">{icon} exp: {round(e):,}</span>'
-                            rows_html += (
-                                f'<tr>'
-                                f'<td style="padding:6px 10px;font-weight:700;color:#1e6fbf;">{kode}</td>'
-                                f'<td style="padding:6px 10px;">{comp["nama"]}</td>'
-                                f'<td style="padding:6px 10px;text-align:right;font-family:monospace;">'
-                                f'Rp {comp["rp"]:,.0f}</td>'
-                                f'<td style="padding:6px 10px;text-align:right;font-family:monospace;">'
-                                f'USD {usd_str} {exp_usd}</td>'
-                                f'</tr>'
+                    # Info Excel
+                    st.markdown("**Sheet yang dibaca:**")
+                    for sheet in excel_data.get("sheets", []):
+                        n = len(sheet["rows"])
+                        if n > 0:
+                            st.markdown(
+                                f'<span style="font-family:monospace;font-size:12px;'
+                                f'color:#6b7280;">📋 {sheet["name"]}: {n} nilai numerik</span>',
+                                unsafe_allow_html=True
                             )
-                        # Total row
-                        if _ext.get("total_rp"):
-                            tl_usd = f"{_ext['total_usd']:,.0f}" if _ext.get("total_usd") else "-"
-                            rows_html += (
-                                f'<tr style="background:#f0f9f4;font-weight:800;border-top:2px solid #1a9e67;">'
-                                f'<td style="padding:8px 10px;" colspan="2">TOTAL</td>'
-                                f'<td style="padding:8px 10px;text-align:right;font-family:monospace;color:#1a9e67;">'
-                                f'Rp {_ext["total_rp"]:,.0f}</td>'
-                                f'<td style="padding:8px 10px;text-align:right;font-family:monospace;color:#1a9e67;">'
-                                f'USD {tl_usd}</td>'
-                                f'</tr>'
-                            )
-                        st.markdown(f"""
-<table style="width:100%;border-collapse:collapse;font-size:13px;
-              background:#fff;border:1px solid #dde3ea;border-radius:8px;overflow:hidden;">
-    <thead>
-        <tr style="background:#f8fafb;border-bottom:2px solid #dde3ea;">
-            <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;
-                       text-transform:uppercase;letter-spacing:1px;width:40px;">Kode</th>
-            <th style="padding:8px 10px;text-align:left;font-size:11px;color:#6b7280;
-                       text-transform:uppercase;letter-spacing:1px;">Uraian</th>
-            <th style="padding:8px 10px;text-align:right;font-size:11px;color:#6b7280;
-                       text-transform:uppercase;letter-spacing:1px;">Nilai Rp</th>
-            <th style="padding:8px 10px;text-align:right;font-size:11px;color:#6b7280;
-                       text-transform:uppercase;letter-spacing:1px;">Nilai USD</th>
-        </tr>
-    </thead>
-    <tbody>{rows_html}</tbody>
-</table>""", unsafe_allow_html=True)
+                    st.markdown("---")
+                    render_excel_comparison(comparison)
+                else:
+                    st.info("Tidak ada data komparasi.")
 
-                # Findings matematika
-                if _mf:
-                    math_grouped = {}
-                    for mf in _mf:
-                        math_grouped.setdefault(mf["severity"], []).append(mf)
-                    for sev in ["kritikal", "minor", "ok", "info"]:
-                        grp = math_grouped.get(sev, [])
-                        if not grp:
-                            continue
-                        cfg = SEVERITY_CONFIG[sev]
-                        st.markdown(
-                            f'<div style="font-size:11px;font-family:monospace;color:#6b7280;'
-                            f'text-transform:uppercase;letter-spacing:1.5px;margin:12px 0 8px;">'
-                            f'{cfg["emoji"]} {sev.upper()} ({len(grp)})'
-                            f'<span style="display:inline-block;height:1px;background:#dde3ea;'
-                            f'width:160px;margin-left:10px;vertical-align:middle;"></span></div>',
-                            unsafe_allow_html=True
-                        )
-                        for mfi, mf in enumerate(grp):
-                            formula_html = ""
-                            if mf.get("formula") and mf["formula"] != "-":
-                                formula_html = (
-                                    f'<div style="margin-top:6px;font-size:11px;'
-                                    f'background:#f0f4ff;border:1px solid #bfcfee;'
-                                    f'border-radius:4px;padding:5px 10px;color:#1e6fbf;'
-                                    f'font-family:monospace;">📐 {mf["formula"]}</div>'
-                                )
-                            sev_cfg = SEVERITY_CONFIG.get(mf["severity"], SEVERITY_CONFIG["info"])
-                            st.markdown(f"""
-<div style="background:{sev_cfg['bg']};border:1px solid {sev_cfg['color']}40;
-            border-left:4px solid {sev_cfg['color']};border-radius:8px;
-            padding:12px 16px;margin-bottom:8px;">
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
-        <span style="background:{sev_cfg['color']}22;color:{sev_cfg['color']};
-                     border:1px solid {sev_cfg['color']};font-size:10px;font-weight:700;
-                     padding:2px 8px;border-radius:4px;text-transform:uppercase;">
-            {sev_cfg['emoji']} {mf['severity']}</span>
-        <span style="color:#666;font-size:11px;font-family:monospace;">{mf.get('category','')}</span>
-        <span style="color:#666;font-size:11px;font-family:monospace;margin-left:auto;">
-            {mf.get('id','')} &nbsp; {mf.get('page_hint','')}</span>
-    </div>
-    <div style="font-size:14px;font-weight:600;color:#1a1a2e;margin-bottom:6px;">{mf['title']}</div>
-    <div style="font-size:12px;color:#444;font-family:monospace;white-space:pre-line;
-                background:#ffffff;padding:8px 12px;border-radius:6px;
-                border:1px solid #e0e0e0;">{mf['detail']}</div>
-    {formula_html}
-</div>""", unsafe_allow_html=True)
+            # ── Download Report ──────────────────────────────────────────────
+            st.markdown("---")
+            report_text = generate_download_report(
+                result, math_result, local_result,
+                [f.name for f in all_files], mode_label
+            )
+            st.download_button(
+                label="⬇️ Download Laporan Review (.txt)",
+                data=report_text.encode("utf-8"),
+                file_name=f"review_{audit_id}.txt",
+                mime="text/plain",
+                use_container_width=False,
+            )
 
-            with st.expander("🔧 Raw JSON Output (untuk debugging)"):
-                st.code(raw_text, language="json")
-
-    # ────────────────────────────────
+    # ────────────────────────────────────────────────
     # TAB 2: PENCARIAN TEKS
-    # ────────────────────────────────
+    # ────────────────────────────────────────────────
     with tab_search:
         st.markdown("#### 🔍 Pencarian Frasa Manual")
         st.caption("Upload dokumen dan cari frasa — dilengkapi highlight.")
@@ -1951,11 +2389,11 @@ def main():
         with col_s1:
             up_pdf_s  = st.file_uploader("PDF",  type="pdf",  accept_multiple_files=True, key="pdf_search")
             up_docx_s = st.file_uploader("DOCX", type="docx", accept_multiple_files=True, key="docx_search")
-            files_s = (up_pdf_s or []) + (up_docx_s or [])
-            sel_laporan_s = st.selectbox("Laporan Referensi", ["(Tidak ada)"] + list(data_laporan.keys()), key="_sel_laporan_s2")
-            if sel_laporan_s != "(Tidak ada)" and sel_laporan_s in data_laporan:
+            files_s   = (up_pdf_s or []) + (up_docx_s or [])
+            sel_ref   = st.selectbox("Laporan Referensi", ["(Tidak ada)"] + list(data_laporan.keys()), key="_sel_laporan_s2")
+            if sel_ref != "(Tidak ada)" and sel_ref in data_laporan:
                 st.markdown("**Wajib cek:**")
-                for k, v in data_laporan[sel_laporan_s].items():
+                for k, v in data_laporan[sel_ref].items():
                     st.write(f"• {k}: {v}x")
         with col_s2:
             phrase = st.text_input("Frasa yang dicari:", placeholder="contoh: tanggal penilaian")
@@ -1963,14 +2401,14 @@ def main():
                 grand_total = 0
                 for uf in files_s:
                     pages = extract_text_pdf(uf) if uf.name.endswith(".pdf") else extract_text_docx(uf)
-                    pattern = re.compile(r"\s*".join(re.escape(w) for w in phrase.split()), re.IGNORECASE)
+                    pattern    = re.compile(r"\s*".join(re.escape(w) for w in phrase.split()), re.IGNORECASE)
                     file_total = 0
                     st.markdown(f"**📄 {uf.name}**")
-                    found_any = False
+                    found_any  = False
                     for i, page_txt in enumerate(pages, 1):
                         matches = pattern.findall(page_txt)
                         if matches:
-                            found_any = True
+                            found_any   = True
                             file_total += len(matches)
                             highlighted = re.sub(
                                 fr"({re.escape(phrase)})",
@@ -1988,32 +2426,31 @@ def main():
             elif phrase and not files_s:
                 st.info("Upload file terlebih dahulu.")
 
-    # ────────────────────────────────
+    # ────────────────────────────────────────────────
     # TAB 3: RIWAYAT AUDIT
-    # ────────────────────────────────
+    # ────────────────────────────────────────────────
     with tab_history:
         st.markdown("#### 📜 Riwayat Audit")
-
-        # Badge status storage
         if gs_connected:
-            st.markdown('<span style="background:#edfaf4;color:#1a9e67;border:1px solid #1a9e67;font-size:11px;font-family:monospace;padding:2px 10px;border-radius:12px;">💾 Tersimpan di Google Sheets</span>', unsafe_allow_html=True)
+            st.markdown('<span style="background:#edfaf4;color:#1a9e67;border:1px solid #1a9e67;'
+                        'font-size:11px;padding:2px 10px;border-radius:12px;">💾 Google Sheets</span>',
+                        unsafe_allow_html=True)
         else:
-            st.markdown('<span style="background:#fff8e6;color:#d4860a;border:1px solid #d4860a;font-size:11px;font-family:monospace;padding:2px 10px;border-radius:12px;">⚠️ Hanya di session (sementara)</span>', unsafe_allow_html=True)
-
+            st.markdown('<span style="background:#fff8e6;color:#d4860a;border:1px solid #d4860a;'
+                        'font-size:11px;padding:2px 10px;border-radius:12px;">⚠️ Sementara (session)</span>',
+                        unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Reload fresh dari sheets
         riwayat = load_riwayat(spreadsheet)
-
         if not riwayat:
-            st.info("Belum ada riwayat audit. Jalankan analisis AI terlebih dahulu.")
+            st.info("Belum ada riwayat audit.")
         else:
             st.caption(f"Total: **{len(riwayat)}** audit tersimpan")
-            for audit_id in sorted(riwayat.keys(), reverse=True):
-                r = riwayat[audit_id]
-                score = r.get("score", 0)
-                files_str = ", ".join(r.get("files", []))
-                with st.expander(f"🕒 {r.get('timestamp','')}  ·  {files_str}  ·  Skor: {score}"):
+            for aid in sorted(riwayat.keys(), reverse=True):
+                r      = riwayat[aid]
+                score  = r.get("score", 0)
+                fstr   = ", ".join(r.get("files", []))
+                with st.expander(f"🕒 {r.get('timestamp','')}  ·  {fstr}  ·  Skor: {score}"):
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Skor QC",    score)
                     c2.metric("🔴 Kritikal", r.get("kritikal", 0))
@@ -2022,30 +2459,28 @@ def main():
                     exec_s = r.get("result", {}).get("summary", {}).get("executive_summary", "")
                     if exec_s:
                         st.caption(exec_s)
-                    if st.button("Tampilkan Detail Temuan", key=f"hist_{audit_id}"):
-                        for fi, f in enumerate(r.get("result", {}).get("findings", [])):
-                            # Riwayat tidak punya pages, render tanpa preview
+                    if st.button("Tampilkan Detail", key=f"hist_{aid}"):
+                        for f in r.get("result", {}).get("findings", []):
                             render_finding_card(f)
-
             st.markdown("---")
             if st.button("🗑 Hapus Semua Riwayat"):
                 clear_riwayat(spreadsheet)
                 st.success("Riwayat dihapus.")
                 st.rerun()
 
-    # ────────────────────────────────
+    # ────────────────────────────────────────────────
     # TAB 4: KELOLA REFERENSI
-    # ────────────────────────────────
+    # ────────────────────────────────────────────────
     with tab_ref:
         st.markdown("#### 📁 Kelola Data Referensi Laporan")
         st.caption("Simpan catatan frekuensi kemunculan frasa per jenis laporan sebagai baseline.")
-
         if gs_connected:
-            st.markdown('<span style="background:#edfaf4;color:#1a9e67;border:1px solid #1a9e67;font-size:11px;font-family:monospace;padding:2px 10px;border-radius:12px;">💾 Tersimpan di Google Sheets</span>', unsafe_allow_html=True)
+            st.markdown('<span style="background:#edfaf4;color:#1a9e67;border:1px solid #1a9e67;'
+                        'font-size:11px;padding:2px 10px;border-radius:12px;">💾 Google Sheets</span>',
+                        unsafe_allow_html=True)
             st.markdown("<br>", unsafe_allow_html=True)
 
         data_laporan = load_data_laporan(spreadsheet)
-
         if not data_laporan:
             st.info("Belum ada data referensi.")
         else:
@@ -2082,11 +2517,11 @@ def main():
             else:
                 st.warning("Nama sudah ada.")
 
-    # ── FOOTER ──
+    # ── FOOTER ──────────────────────────────────────────────────────────────
     st.markdown("""
 <hr style="margin-top:40px;border-color:#dde3ea;">
 <p style="text-align:center;font-size:12px;color:#9ca3af;font-family:'DM Mono',monospace;">
-    CekLaporan v6.0 &nbsp;·&nbsp; KJPP SRR &nbsp;·&nbsp;
+    CekLaporan v7.0 &nbsp;·&nbsp; KJPP SRR &nbsp;·&nbsp;
     Powered by Claude AI (claude-sonnet-4-5) &nbsp;·&nbsp; Created by HW
 </p>""", unsafe_allow_html=True)
 
