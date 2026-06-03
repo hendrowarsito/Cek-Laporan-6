@@ -91,6 +91,80 @@ SEVERITY_CONFIG = {
     "mismatch": {"emoji": "🔶", "color": "#7c3aed", "bg": "#f5f3ff"},
 }
 
+# Konfigurasi seksi tampilan temuan (grouped table format)
+SECTION_CONFIG = [
+    {
+        "num": 1,
+        "key": "typo",
+        "title": "KESALAHAN KETIK (TYPO)",
+        "categories": ["Typo"],
+        "style": "table_typo",   # No | Lokasi | Teks Salah | Seharusnya
+    },
+    {
+        "num": 2,
+        "key": "artefak",
+        "title": "INKONSISTENSI BESAR (TEKS DARI LAPORAN LAIN)",
+        "categories": ["Artefak Copy-Paste"],
+        "style": "narrative",
+    },
+    {
+        "num": 3,
+        "key": "penomoran",
+        "title": "INKONSISTENSI PENOMORAN",
+        "categories": ["Penomoran", "Penomoran Ganda", "Penomoran Sub-Bab"],
+        "style": "table_lokasi_masalah",  # No | Lokasi | Masalah
+    },
+    {
+        "num": 4,
+        "key": "placeholder",
+        "title": "NILAI/DATA YANG BELUM DIISI (PLACEHOLDER)",
+        "categories": ["Placeholder", "Placeholder Belum Diisi"],
+        "style": "table_lokasi_keterangan",  # No | Lokasi | Keterangan
+    },
+    {
+        "num": 5,
+        "key": "nama",
+        "title": "INKONSISTENSI NAMA PERUSAHAAN",
+        "categories": ["Nama Perusahaan"],
+        "style": "table_nama",  # No | Lokasi | Teks | Catatan
+    },
+    {
+        "num": 6,
+        "key": "ejaan",
+        "title": "INKONSISTENSI EJAAN & PENULISAN",
+        "categories": ["Ejaan & Penulisan", "Inkonsistensi Ejaan"],
+        "style": "table_ejaan",  # No | Masalah | Contoh
+    },
+    {
+        "num": 7,
+        "key": "logis",
+        "title": "INKONSISTENSI LOGIS/SUBSTANSI",
+        "categories": ["Logis/Substansi"],
+        "style": "table_lokasi_masalah",  # No | Lokasi | Masalah
+    },
+    {
+        "num": 8,
+        "key": "nilai",
+        "title": "INKONSISTENSI NILAI",
+        "categories": ["Konsistensi Nilai", "Konsistensi Tanggal", "Konsistensi Alamat"],
+        "style": "table_lokasi_masalah",
+    },
+    {
+        "num": 9,
+        "key": "standar",
+        "title": "KESESUAIAN STANDAR (KEPI/SPI/POJK)",
+        "categories": ["KEPI/SPI/POJK"],
+        "style": "table_lokasi_masalah",
+    },
+    {
+        "num": 10,
+        "key": "lainlain",
+        "title": "TEMUAN LAINNYA",
+        "categories": [],  # catch-all
+        "style": "table_lokasi_masalah",
+    },
+]
+
 # ──────────────────────────────────────────────
 # MODE CONFIG — instruksi untuk Claude
 # ──────────────────────────────────────────────
@@ -443,9 +517,11 @@ Gunakan struktur PERSIS berikut:
     {
       "id": "F001",
       "severity": "kritikal",
-      "category": "Artefak Copy-Paste",
+      "category": "Typo",
       "title": "Judul singkat temuan (maks 10 kata)",
       "detail": "Penjelasan detail: apa yang ditemukan, di mana (sebutkan bab/halaman spesifik), dan mengapa ini masalah. Kutip teks bermasalah jika relevan.",
+      "teks_salah": "",
+      "seharusnya": "",
       "page_hint": "Hal. 3 / Bab 1.7",
       "property": ""
     }
@@ -457,6 +533,21 @@ Panduan severity:
 - minor: ketidakkonsistenan kecil, potensi perbaikan, typo
 - ok: elemen yang sudah benar dan sesuai standar
 - info: catatan atau saran
+
+Kategori yang WAJIB digunakan (pilih yang paling sesuai):
+- "Typo" — kesalahan ketik: huruf ganda, huruf hilang, kata duplikat, spasi salah (WAJIB isi teks_salah dan seharusnya)
+- "Artefak Copy-Paste" — teks dari laporan lain yang tidak relevan
+- "Penomoran" — inkonsistensi penomoran tabel/gambar/sub-bab
+- "Placeholder" — nilai belum diisi: Rp xx, tabel kosong
+- "Nama Perusahaan" — inkonsistensi nama/ejaan perusahaan
+- "Ejaan & Penulisan" — inkonsistensi ejaan (batu bara/batubara), singkatan, format penulisan
+- "Logis/Substansi" — inkonsistensi logis: duplikasi teks, judul vs isi, alamat ganda
+- "Konsistensi Nilai" — angka tidak konsisten antar bagian
+- "Konsistensi Tanggal" — tanggal tidak konsisten
+- "Konsistensi Alamat" — alamat tidak konsisten
+- "KEPI/SPI/POJK" — ketidaksesuaian standar
+- "Formula Resume" — kesalahan perhitungan matematis
+- "Lain-lain" — kategori lain
 
 overall_score: 0-100 (100 = sempurna tanpa kritikal/minor)."""
 
@@ -768,7 +859,7 @@ def cek_typo_lokal(doc_text: str) -> list:
         findings.append({
             "id": "LT01",
             "severity": "minor",
-            "category": "Typo — Huruf Ganda",
+            "category": "Typo",
             "title": f"Ditemukan {len(seen_words)} kata dengan huruf ganda tidak lazim",
             "detail": (
                 f"Kata-kata berikut mengandung konsonan ganda yang sangat jarang "
@@ -828,7 +919,7 @@ def cek_typo_lokal(doc_text: str) -> list:
         findings.append({
             "id": "LT02",
             "severity": "minor",
-            "category": "Typo — Salah Ketik",
+            "category": "Typo",
             "title": f"Ditemukan {len(word_typo_hits)} kata yang kemungkinan salah ketik",
             "detail": (
                 "Kata-kata berikut tampak salah ketik berdasarkan pola yang umum terjadi:\n"
@@ -844,7 +935,7 @@ def cek_typo_lokal(doc_text: str) -> list:
         findings.append({
             "id": "LT03",
             "severity": "minor",
-            "category": "Typo — Spasi Ganda",
+            "category": "Typo",
             "title": f"Ditemukan ±{double_space_count} lokasi spasi ganda",
             "detail": (
                 f"Ada sekitar {double_space_count} tempat dalam dokumen yang mengandung "
@@ -885,7 +976,7 @@ def cek_artefak_dan_placeholder(doc_text: str, mode_key: str) -> dict:
         findings.append({
             "id": "L001",
             "severity": "kritikal",
-            "category": "Placeholder Belum Diisi",
+            "category": "Placeholder",
             "title": f"Ditemukan {len(ph_hits)} placeholder yang belum diisi",
             "detail": (
                 f"Terdapat {len(ph_hits)} bagian yang tampak belum selesai diisi:\n"
@@ -928,7 +1019,7 @@ def cek_artefak_dan_placeholder(doc_text: str, mode_key: str) -> dict:
         findings.append({
             "id": "L002",
             "severity": "minor",
-            "category": "Penomoran Ganda",
+            "category": "Penomoran",
             "title": f"Penomoran duplikat: {len(duplikat_tabel)} tabel, {len(duplikat_gambar)} gambar",
             "detail": (
                 "Nomor tabel/gambar berikut muncul lebih dari 2 kali — "
@@ -971,7 +1062,7 @@ def cek_artefak_dan_placeholder(doc_text: str, mode_key: str) -> dict:
         findings.append({
             "id": "L003",
             "severity": "minor",
-            "category": "Penomoran Sub-Bab",
+            "category": "Penomoran",
             "title": f"Ditemukan {len(subbab_issues)} penomoran sub-bab yang tidak urut",
             "detail": (
                 "Penomoran sub-bab berikut tampak tidak urut atau salah:\n"
@@ -989,7 +1080,7 @@ def cek_artefak_dan_placeholder(doc_text: str, mode_key: str) -> dict:
         findings.append({
             "id": "L004",
             "severity": "minor",
-            "category": "Inkonsistensi Ejaan",
+            "category": "Ejaan & Penulisan",
             "title": "Penulisan 'batu bara' dan 'batubara' tidak konsisten",
             "detail": (
                 f"'batu bara' (dua kata) muncul {n_batu_bara}× dan "
