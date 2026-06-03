@@ -843,7 +843,7 @@ def cek_typo_lokal(doc_text: str) -> list:
         # Format angka / tanda baca salah
         (r'Rp\s*[\d\.]+,\s*juta',      '"Rp xxx, juta"',        '"Rp xxx juta"',                 'koma di posisi salah antara angka dan "juta"'),
         # Awal kalimat tidak kapital setelah titik (sampling pada "pada 20xx")
-        (r'(?<=[.!?]\s{1,3})pada\s+20\d\d',  '"pada 20xx" (awal kalimat)', '"Pada 20xx"',       'awal kalimat harus kapital'),
+        (r'(?<=[.!?] )pada\s+20\d\d',         '"pada 20xx" (awal kalimat)', '"Pada 20xx"',       'awal kalimat harus kapital'),
         # Spasi ganda antar kata
         (r'\bPT\s{2,}(?=[A-Z])',       '"PT  [nama]"',          '"PT [nama]"',                   'spasi ganda setelah "PT"'),
         # Kata umum lainnya
