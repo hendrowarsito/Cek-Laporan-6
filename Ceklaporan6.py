@@ -84,81 +84,80 @@ PLACEHOLDER_PATTERNS = [
 ]
 
 SEVERITY_CONFIG = {
-    "kritikal": {"emoji": "🔴", "color": "#c0392b", "bg": "#fff0f0"},
+    "kritis":   {"emoji": "🔴", "color": "#c0392b", "bg": "#fff0f0"},
+    "kritikal": {"emoji": "🔴", "color": "#c0392b", "bg": "#fff0f0"},  # alias backward compat
+    "mayor":    {"emoji": "🟠", "color": "#e67e22", "bg": "#fff5ec"},
     "minor":    {"emoji": "🟡", "color": "#d4860a", "bg": "#fff8e6"},
     "ok":       {"emoji": "🟢", "color": "#1a9e67", "bg": "#edfaf4"},
     "info":     {"emoji": "🔵", "color": "#1e6fbf", "bg": "#eef4ff"},
     "mismatch": {"emoji": "🔶", "color": "#7c3aed", "bg": "#f5f3ff"},
 }
 
-# Konfigurasi seksi tampilan temuan (grouped table format)
+# Konfigurasi seksi tampilan temuan — sesuai CLAUDE.md Bagian A-J
 SECTION_CONFIG = [
     {
-        "num": 1,
-        "key": "typo",
-        "title": "KESALAHAN KETIK (TYPO)",
-        "categories": ["Typo"],
-        "style": "table_typo",   # No | Lokasi | Teks Salah | Seharusnya
+        "num": "A", "key": "angka",
+        "title": "VERIFIKASI ANGKA KUNCI (Laporan vs LK)",
+        "categories": ["Konsistensi Nilai", "Formula Resume", "Konsistensi Tanggal",
+                       "Konsistensi Alamat", "Konsistensi Luas"],
+        "style": "table_angka",  # No | Lokasi | Parameter | Nilai LK | Nilai LP | Status
     },
     {
-        "num": 2,
-        "key": "artefak",
-        "title": "INKONSISTENSI BESAR (TEKS DARI LAPORAN LAIN)",
+        "num": "B", "key": "artefak",
+        "title": "TEKS ASING / SISA COPY-PASTE",
         "categories": ["Artefak Copy-Paste"],
         "style": "narrative",
     },
     {
-        "num": 3,
-        "key": "penomoran",
+        "num": "C", "key": "placeholder",
+        "title": "PLACEHOLDER / DATA BELUM DIISI",
+        "categories": ["Placeholder", "Placeholder Belum Diisi"],
+        "style": "table_lokasi_keterangan",
+    },
+    {
+        "num": "D", "key": "penomoran",
         "title": "INKONSISTENSI PENOMORAN",
         "categories": ["Penomoran", "Penomoran Ganda", "Penomoran Sub-Bab"],
-        "style": "table_lokasi_masalah",  # No | Lokasi | Masalah
+        "style": "table_lokasi_masalah",
     },
     {
-        "num": 4,
-        "key": "placeholder",
-        "title": "NILAI/DATA YANG BELUM DIISI (PLACEHOLDER)",
-        "categories": ["Placeholder", "Placeholder Belum Diisi"],
-        "style": "table_lokasi_keterangan",  # No | Lokasi | Keterangan
-    },
-    {
-        "num": 5,
-        "key": "nama",
-        "title": "INKONSISTENSI NAMA PERUSAHAAN",
+        "num": "E", "key": "nama",
+        "title": "INKONSISTENSI NAMA ENTITAS",
         "categories": ["Nama Perusahaan"],
-        "style": "table_nama",  # No | Lokasi | Teks | Catatan
+        "style": "table_nama",
     },
     {
-        "num": 6,
-        "key": "ejaan",
+        "num": "F", "key": "ejaan",
         "title": "INKONSISTENSI EJAAN & PENULISAN",
         "categories": ["Ejaan & Penulisan", "Inkonsistensi Ejaan"],
-        "style": "table_ejaan",  # No | Masalah | Contoh
+        "style": "table_ejaan",
     },
     {
-        "num": 7,
-        "key": "logis",
-        "title": "INKONSISTENSI LOGIS/SUBSTANSI",
+        "num": "G", "key": "typo",
+        "title": "KESALAHAN KETIK & BAHASA",
+        "categories": ["Typo"],
+        "style": "table_typo",
+    },
+    {
+        "num": "H", "key": "logis",
+        "title": "INKONSISTENSI LOGIS / SUBSTANSI",
         "categories": ["Logis/Substansi"],
-        "style": "table_lokasi_masalah",  # No | Lokasi | Masalah
-    },
-    {
-        "num": 8,
-        "key": "nilai",
-        "title": "INKONSISTENSI NILAI",
-        "categories": ["Konsistensi Nilai", "Konsistensi Tanggal", "Konsistensi Alamat"],
         "style": "table_lokasi_masalah",
     },
     {
-        "num": 9,
-        "key": "standar",
-        "title": "KESESUAIAN STANDAR (KEPI/SPI/POJK)",
-        "categories": ["KEPI/SPI/POJK"],
+        "num": "I", "key": "daftar",
+        "title": "DAFTAR ISI, DAFTAR GAMBAR, DAFTAR TABEL",
+        "categories": ["Daftar Isi", "Daftar Gambar", "Daftar Tabel"],
         "style": "table_lokasi_masalah",
     },
     {
-        "num": 10,
-        "key": "lainlain",
+        "num": "J", "key": "standar",
+        "title": "KEPATUHAN STANDAR SPI / KEPI / POJK",
+        "categories": ["KEPI/SPI/POJK", "SPI", "POJK"],
+        "style": "table_lokasi_masalah",
+    },
+    {
+        "num": "—", "key": "lainlain",
         "title": "TEMUAN LAINNYA",
         "categories": [],  # catch-all
         "style": "table_lokasi_masalah",
@@ -171,75 +170,95 @@ SECTION_CONFIG = [
 MODE_CONFIG = {
     "🔍 Pre-Check": {
         "key": "precheck",
-        "desc": "Pengecekan cepat ~30 detik. Fokus pada isu kritikal.",
+        "desc": "Orientasi cepat — temukan masalah KRITIS dalam 60 detik.",
         "instruction": (
-            "Lakukan pengecekan cepat (Pre-Check). Fokus pada isu kritikal: "
-            "inkonsistensi nilai, tanggal, luas, dan alamat. Ringkas dalam 5-8 temuan utama. "
-            "Khusus perhatikan: (1) apakah ada nama entitas yang tidak relevan (artefak copy-paste), "
-            "(2) apakah ada nilai placeholder seperti 'Rp xx' atau tabel kosong, "
-            "(3) apakah nomor laporan konsisten di semua bagian."
+            "Lakukan Pre-Check cepat. Bangun model mental laporan ini terlebih dahulu:\n"
+            "- Apa nama objek/perusahaan yang dinilai?\n"
+            "- Siapa kliennya? Di mana lokasinya?\n"
+            "- Berapa nilai indikasinya?\n\n"
+            "Kemudian fokus pada TIGA hal paling kritikal:\n"
+            "1. ARTEFAK COPY-PASTE: Ada nama entitas/singkatan yang tidak pernah diperkenalkan "
+            "dalam laporan ini? Cek setiap nama perusahaan, singkatan, dan konteks narasi. "
+            "Laporan saham sangat rentan — setiap nama asing = temuan KRITIS.\n"
+            "2. PLACEHOLDER BELUM DIISI: 'Rp xx', 'USD xx', '[nilai]', tabel berisi "
+            "hanya kata 'Tabel' tanpa data, bagian yang tampak belum selesai.\n"
+            "3. FOOTER/HEADER SALAH: Baca footer setiap halaman — apakah menyebut "
+            "nama proyek yang benar?\n\n"
+            "Ringkas dalam 5-10 temuan prioritas tinggi. Setiap temuan harus spesifik: "
+            "sebutkan halaman, kutip teks bermasalah."
         ),
     },
     "🧠 Deep Audit": {
         "key": "deepaudit",
-        "desc": "Audit menyeluruh setiap bagian laporan.",
+        "desc": "Audit editor senior — baca seluruh laporan dengan tiga lapisan pemeriksaan.",
         "instruction": (
-            "Lakukan audit mendalam dan menyeluruh. Periksa setiap bagian laporan secara detail. "
-            "Identifikasi semua inkonsistensi, kejanggalan naratif, kesalahan penulisan angka, "
-            "dan potensi kesalahan material.\n\n"
+            "Lakukan DEEP AUDIT sebagai editor senior. Baca laporan dari halaman pertama "
+            "hingga terakhir. Jalankan TIGA lapisan pemeriksaan secara simultan:\n\n"
 
-            "=== DETEKSI KHUSUS (WAJIB LAKUKAN) ===\n"
-            "A. ARTEFAK COPY-PASTE: Cari teks yang tidak relevan dengan obyek laporan ini — "
-            "misalnya nama perusahaan lain, nama properti lain, atau paragraf tentang "
-            "industri/negara yang tidak terkait. Ini adalah kesalahan paling umum.\n\n"
+            "=== LAPISAN 1: LINGUISTIK (Kata demi Kata) ===\n"
+            "Deteksi secara MANDIRI (bukan hanya dari daftar pola):\n"
+            "• Setiap kata yang terasa tidak lengkap atau ada huruf lebih\n"
+            "• Kata yang terulang dua kali berturutan ('terdiri terdiri dari')\n"
+            "• Huruf visual mirip tapi beda: l vs I, 0 vs O, rn vs m\n"
+            "• Tanda baca menggantikan huruf ('era!' → 'erat', '1nflasi' → 'Inflasi')\n"
+            "• Spasi di tengah kata ('tu run' → 'turun')\n"
+            "• Awal kalimat tidak kapital, kalimat tidak berakhir tanda titik\n"
+            "• Format angka salah: 'Rp 283.118, juta' (koma di posisi salah)\n"
+            "• Ejaan KBBI: 'batu bara' (dua kata), 'bertanggung jawab', 'kerja sama'\n\n"
 
-            "B. PLACEHOLDER BELUM DIISI: Cari nilai 'xx', 'Rp xx', 'USD xx', "
-            "tabel yang hanya berisi kata 'Tabel' tanpa data, titik-titik panjang "
-            "sebagai penanda nilai belum diisi, atau bagian yang tampak belum selesai ditulis.\n\n"
+            "=== LAPISAN 2: KONTEKS & RELEVANSI (Paragraf demi Paragraf) ===\n"
+            "• Catat semua nama entitas dan singkatan yang muncul\n"
+            "• Tandai yang tidak pernah diperkenalkan → kemungkinan artefak copy-paste\n"
+            "• Apakah konteks narasi relevan dengan bisnis yang dinilai?\n"
+            "• Baca footer setiap halaman — apakah nama proyek benar?\n"
+            "• Cari placeholder: 'Rp xx', tabel kosong, bagian belum selesai\n\n"
 
-            "C. PENOMORAN GANDA: Cek apakah ada nomor tabel, gambar, atau sub-bab yang muncul "
-            "dua kali (misalnya 'Gambar 4.8' muncul di dua halaman berbeda, atau sub-bab "
-            "bernomor '3.6.2' padahal seharusnya '3.7.1').\n\n"
+            "=== LAPISAN 3: KONSISTENSI (Dokumen Keseluruhan) ===\n"
+            "• Angka yang sama — selalu sama di setiap bagian?\n"
+            "• Nilai kesimpulan = nilai ringkasan eksekutif = nilai surat pengantar?\n"
+            "• Nama perusahaan/objek — ejaan sama persis?\n"
+            "• Nomor sub-bab urut dan logis?\n"
+            "• Judul sub-bab mencerminkan isinya?\n"
+            "• Cover dan footer menyebut jenis laporan yang sama?\n"
+            "• Kronologis: tanggal inspeksi ≤ tanggal cut-off ≤ tanggal laporan?\n\n"
 
-            "D. FOOTER/HEADER SALAH: Cek apakah footer atau header setiap bab sudah sesuai "
-            "dengan obyek laporan saat ini (bukan nama laporan lain).\n\n"
-
-            "E. DUPLIKASI TEKS: Cek paragraf yang diulang verbatim di beberapa bab — "
-            "pastikan isinya identik, tidak ada perbedaan kecil yang menyesatkan.\n\n"
-
-            "F. TYPO KARAKTER (WAJIB): Scan setiap kata dalam dokumen untuk:\n"
-            "   - Huruf ganda tidak lazim: 'berrdasarkan', 'deengan', 'adaalah', "
-            "'bahwwa', 'terrmasuk', 'peruusahaan', 'kerrja', dll.\n"
-            "   - Huruf hilang: 'berdsarkan', 'penilain', 'keuangn', dll.\n"
-            "   - Kata duplikat: 'bahwa bahwa', 'yang yang', 'pada pada', dll.\n"
-            "   Laporkan setiap typo dengan kutipan kalimat dan koreksi yang benar.\n\n"
-
-            "Berikan temuan SPESIFIK dengan menyebutkan bagian/halaman dan teks yang bermasalah."
+            "Laporkan SETIAP temuan dengan: halaman/bab spesifik, kutipan teks bermasalah, "
+            "dan saran perbaikan konkret."
         ),
     },
     "📐 KEPI/MAPPI": {
         "key": "mappi",
-        "desc": "Pengecekan kesesuaian standar SPI & MAPPI.",
+        "desc": "Kepatuhan standar SPI, KEPI, MAPPI.",
         "instruction": (
-            "Periksa kesesuaian dengan standar KEPI/MAPPI dan SPI (Standar Penilaian Indonesia). "
-            "Apakah semua elemen wajib ada? Apakah metode penilaian sesuai standar? "
-            "Apakah pengungkapan dan asumsi sudah lengkap?"
+            "Lakukan pemeriksaan kepatuhan standar KEPI/MAPPI dan SPI (Standar Penilaian Indonesia).\n\n"
+            "ELEMEN WAJIB SPI yang harus ada:\n"
+            "□ Pernyataan kepatuhan terhadap SPI\n"
+            "□ Asumsi dan syarat pembatas\n"
+            "□ Kualifikasi dan nomor izin penilai (MAPPI)\n"
+            "□ Pembatasan penggunaan laporan\n"
+            "□ Pernyataan independensi penilai\n"
+            "□ Tanggal inspeksi / kunjungan lapangan\n"
+            "□ Tujuan penilaian\n"
+            "□ Dasar nilai (Nilai Pasar / Nilai Likuidasi / dll.)\n"
+            "□ Pendekatan dan metode yang digunakan\n"
+            "□ Data dan sumber yang digunakan\n\n"
+            "Juga periksa: apakah metode penilaian sesuai dengan jenis objek dan tujuan penilaian? "
+            "Apakah pengungkapan dan asumsi sudah lengkap dan logis?"
         ),
     },
     "🏢 Multi-Objek": {
         "key": "multiobj",
-        "desc": "Untuk laporan dengan banyak properti.",
+        "desc": "Laporan dengan banyak properti/objek.",
         "instruction": (
-            "Ini adalah laporan multi-objek/multi-properti. "
-            "LANGKAH 1: Identifikasi terlebih dahulu berapa dan apa saja objek properti yang ada. "
-            "LANGKAH 2: Untuk SETIAP objek, cek konsistensi secara terpisah. "
-            "LANGKAH 3: Tandai temuan dengan nama objek yang relevan. "
-            "LANGKAH 4: Cek secara khusus apakah ada data objek yang tercampur antar objek "
-            "(misalnya luas tanah objek A disebut di bagian objek B).\n\n"
-            "DETEKSI KHUSUS:\n"
-            "- Artefak copy-paste (nama entitas tidak relevan)\n"
-            "- Placeholder belum diisi (xx, tabel kosong)\n"
-            "- Penomoran ganda tabel/gambar"
+            "Ini laporan multi-objek/multi-properti.\n\n"
+            "LANGKAH 1 — IDENTIFIKASI: Temukan semua objek properti yang ada. Buat daftar.\n"
+            "LANGKAH 2 — PER OBJEK: Untuk SETIAP objek, cek konsistensi secara terpisah "
+            "(nama, lokasi, luas, nilai).\n"
+            "LANGKAH 3 — ANTAR OBJEK: Apakah ada data objek yang tercampur? "
+            "(luas tanah objek A disebut di bagian objek B?)\n"
+            "LANGKAH 4 — LINTAS DOKUMEN: Jalankan 3 lapisan pemeriksaan dari Deep Audit "
+            "untuk keseluruhan dokumen.\n\n"
+            "Tandai setiap temuan dengan nama objek yang relevan di field 'property'."
         ),
     },
     "🏭 Penilaian Aset": {
@@ -477,79 +496,132 @@ CHECK_ITEMS_FAIRNESS = [
 # ──────────────────────────────────────────────
 # SYSTEM PROMPT
 # ──────────────────────────────────────────────
-SYSTEM_PROMPT = """Kamu adalah expert QA auditor laporan penilaian di Indonesia.
-Kamu memahami standar KEPI, MAPPI, SPI (Standar Penilaian Indonesia), dan POJK 35/2020 dengan sangat baik.
+SYSTEM_PROMPT = """Kamu adalah EDITOR SENIOR laporan penilaian di KJPP Suwendho Rinaldy dan Rekan (KJPP SRR).
+Kamu bukan mesin pencari kata kunci. Kamu membaca laporan dengan pikiran kritis penuh, persis seperti
+editor berpengalaman yang mempertanyakan setiap kata, angka, dan paragraf yang kamu temui.
 
-KESALAHAN PALING UMUM yang wajib kamu deteksi:
-1. ARTEFAK COPY-PASTE: nama perusahaan/properti/entitas dari laporan lain yang tidak diganti.
-   Contoh: laporan tentang KMS tapi ada paragraf menyebut "AMP", "SBPL", "PSS Pte Ltd", dll.
-2. PLACEHOLDER BELUM DIISI: "Rp xx juta", tabel yang hanya berisi kata "Tabel", nilai "..."
-   sebagai pengganti angka, bagian yang tampak belum selesai ditulis.
-3. PENOMORAN GANDA: "Gambar 4.8" muncul dua kali, sub-bab bernomor "3.6.2" tapi seharusnya "3.7.1".
-4. FOOTER/HEADER SALAH: bab dengan footer nama laporan atau obyek yang berbeda.
-5. INKONSISTENSI NILAI: angka yang sama disebut berbeda di bagian yang berbeda.
-6. INKONSISTENSI NAMA: nama perusahaan/obyek penilaian berbeda ejaan di bagian berbeda.
-7. TYPO DAN SALAH KETIK: Scan SETIAP kata dalam dokumen untuk menemukan:
-   - Huruf ganda yang salah: "berrdasarkan", "deengan", "adaalah", "bahwwa", "untukk", dll.
-   - Huruf hilang: "berdsarkan" (tanpa 'a'), "keuangn" (tanpa 'a'), dll.
-   - Spasi salah: "danpada" (seharusnya "dan pada"), "disebutkan bahwa" ditulis tanpa spasi.
-   - Salah huruf: "diperlkukan" → "diperlukan", "pemilk" → "pemilik".
-   - Kata ulang tidak sempurna dalam konteks formal.
-   PENTING: Laporkan SETIAP typo yang ditemukan sebagai temuan tersendiri (severity: minor),
-   sebutkan kata yang salah, kutip kalimatnya, dan sebutkan koreksi yang benar.
+═══════════════════════════════════════════════════════
+MENTALITAS EDITOR: BACA INI SEBELUM APAPUN
+═══════════════════════════════════════════════════════
 
-SELALU berikan output HANYA dalam format JSON yang valid, tanpa teks apapun di luar JSON.
-Gunakan struktur PERSIS berikut:
+Setiap kali kamu menyentuh sebuah kata, kalimat, angka, atau paragraf — tanya pada dirimu:
+"Apakah ini terasa benar? Apakah ini masuk akal? Apakah ini konsisten dengan yang sudah kubaca?"
+
+PRINSIP UTAMA:
+1. Typo di setiap laporan adalah UNIK — jangan hanya mengandalkan daftar pola.
+   Gunakan intuisi bahasamu untuk mendeteksi apapun yang terasa "ganjil".
+2. Jika terasa aneh, CATAT. Lebih baik 5 temuan yang ternyata bukan masalah
+   daripada melewatkan 1 kesalahan fatal.
+3. Verifikasi silang aktif — saat membaca Bab 4, ingat apa yang ada di Bab 1.
+4. Baca HEADER dan FOOTER setiap halaman — ini sering mengandung kesalahan serius.
+5. Bangun model mental: siapa nama perusahaan/objek, bisnisnya apa, di mana,
+   siapa kliennya, berapa nilainya. Setiap informasi baru — cek konsistensinya.
+
+═══════════════════════════════════════════════════════
+TIGA LAPISAN PEMERIKSAAN (JALANKAN SIMULTAN)
+═══════════════════════════════════════════════════════
+
+LAPISAN 1 — LINGUISTIK (kata demi kata):
+• Apakah setiap kata terasa utuh dan benar secara ejaan?
+• Kata terulang dua kali berturutan? (mis: "terdiri terdiri dari")
+• Huruf visual mirip tapi beda: l kecil vs I kapital, 0 vs O, rn vs m, cl vs d
+• Tanda baca menggantikan huruf: "era!" → seharusnya "erat", "1nflasi" → "Inflasi"
+• Spasi tersesat di tengah kata: "tu run" → "turun", "ber sama" → "bersama"
+• Awal kalimat tidak kapital, kalimat tidak berakhir tanda titik
+• Format angka Indonesia: titik=ribuan (Rp1.250.000), koma=desimal (10,5%)
+  SALAH: "Rp1,250,000" atau "Rp. 1.250.000" atau "Rp 283.118, juta"
+• Huruf ganda tidak lazim: "berrdasarkan", "secarra", "prusahaan", "penigkatan"
+• Ejaan KBBI: "batu bara" (dua kata), "bertanggung jawab" (dua kata),
+  "kerja sama" (dua kata), "izin" bukan "ijin", "praktik" bukan "praktek"
+
+LAPISAN 2 — KONTEKS & RELEVANSI (paragraf demi paragraf):
+• Apakah semua nama entitas/singkatan sudah diperkenalkan dalam laporan ini?
+  Nama muncul tiba-tiba tanpa penjelasan = kemungkinan besar sisa laporan lain → 🔴 KRITIS
+• Konteks narasi relevan dengan bisnis/aset yang dinilai?
+  (laporan pertambangan batu bara di Kalimantan tidak membahas "pasar Singapura")
+• Footer/header setiap halaman — apakah menyebut nama proyek yang benar?
+  Footer salah muncul di 6 halaman berturut-turut = 🔴 KRITIS
+• Placeholder belum diisi: "Rp xx", "[nilai]", "[nama]", tabel berisi kata "Tabel" saja = 🔴 KRITIS
+
+LAPISAN 3 — KONSISTENSI (dokumen secara keseluruhan):
+• Angka yang sama (nilai, luas, %) — selalu sama di setiap bagian?
+• Angka dalam narasi = angka dalam tabel?
+• Nilai di kesimpulan = nilai di bab penilaian = nilai di ringkasan eksekutif?
+• Nama perusahaan/objek — ejaan sama persis di seluruh dokumen?
+• Nomor sub-bab urut dan logis? (3.6.2 di Bab 3.7 = kesalahan)
+• Nomor gambar/tabel urut, tidak ada duplikat?
+• Judul sub-bab mencerminkan isinya?
+• Cover dan footer menyebut jenis laporan yang sama?
+• Urutan kronologis masuk akal: tanggal inspeksi ≤ tanggal cut-off ≤ tanggal laporan?
+
+═══════════════════════════════════════════════════════
+STRUKTUR OUTPUT — BAGIAN A SAMPAI J
+═══════════════════════════════════════════════════════
+
+Kelompokkan temuan ke dalam bagian berikut menggunakan field "category":
+• "Konsistensi Nilai" / "Konsistensi Tanggal" / "Konsistensi Luas" → Bagian A
+• "Artefak Copy-Paste" → Bagian B
+• "Placeholder" → Bagian C
+• "Penomoran" → Bagian D
+• "Nama Perusahaan" → Bagian E
+• "Ejaan & Penulisan" → Bagian F
+• "Typo" → Bagian G
+• "Logis/Substansi" → Bagian H
+• "Daftar Isi" / "Daftar Gambar" / "Daftar Tabel" → Bagian I
+• "KEPI/SPI/POJK" → Bagian J
+
+═══════════════════════════════════════════════════════
+PANDUAN SEVERITY
+═══════════════════════════════════════════════════════
+
+🔴 kritis  — mempengaruhi validitas atau dapat menyesatkan pembaca secara signifikan:
+             artefak copy-paste, placeholder, footer salah, angka material tidak konsisten
+🟠 mayor   — masalah serius yang harus diperbaiki sebelum terbit:
+             inkonsistensi angka non-material, nama entitas tidak konsisten,
+             judul sub-bab tidak sesuai isi, penomoran salah
+🟡 minor   — ketidakkonsistenan kecil, typo, inkonsistensi ejaan
+🟢 ok      — elemen yang sudah benar dan sesuai standar (gunakan jika perlu dikonfirmasi)
+🔵 info    — catatan atau saran perbaikan
+
+═══════════════════════════════════════════════════════
+FORMAT JSON OUTPUT (WAJIB — TIDAK BOLEH ADA TEKS DI LUAR JSON)
+═══════════════════════════════════════════════════════
 
 {
-  "report_type": "deskripsi singkat jenis laporan",
-  "properties": ["nama/deskripsi entitas utama"],
+  "report_type": "deskripsi jenis laporan (mis: Laporan Penilaian Saham PT KMS)",
+  "valuation_type": "Saham|Aset|Perkebunan|Hotel|Tanah & Bangunan|Fairness Opinion",
+  "properties": ["nama entitas/objek utama yang dinilai"],
   "summary": {
     "total_findings": 0,
-    "kritikal": 0,
+    "kritis": 0,
+    "mayor": 0,
     "minor": 0,
     "ok": 0,
-    "info": 0,
     "overall_score": 85,
-    "executive_summary": "Ringkasan 2-3 kalimat hasil audit secara keseluruhan."
+    "status": "LULUS|PERLU REVISI MINOR|PERLU REVISI MAYOR",
+    "executive_summary": "2-3 kalimat ringkasan kritis: apa masalah terbesar, dampaknya apa, rekomendasi utama."
   },
   "findings": [
     {
       "id": "F001",
-      "severity": "kritikal",
-      "category": "Typo",
-      "title": "Judul singkat temuan (maks 10 kata)",
-      "detail": "Penjelasan detail: apa yang ditemukan, di mana (sebutkan bab/halaman spesifik), dan mengapa ini masalah. Kutip teks bermasalah jika relevan.",
-      "teks_salah": "",
-      "seharusnya": "",
-      "page_hint": "Hal. 3 / Bab 1.7",
+      "severity": "kritis",
+      "category": "Artefak Copy-Paste",
+      "title": "Judul singkat (maks 10 kata)",
+      "detail": "Penjelasan detail dengan kutipan teks bermasalah dan lokasi spesifik.",
+      "teks_salah": "kutipan teks yang salah",
+      "seharusnya": "saran perbaikan / teks yang benar",
+      "page_hint": "Hal. 14 / Bab 1.7",
       "property": ""
     }
   ]
 }
 
-Panduan severity:
-- kritikal: mempengaruhi nilai, validitas, atau dapat menyesatkan pembaca
-- minor: ketidakkonsistenan kecil, potensi perbaikan, typo
-- ok: elemen yang sudah benar dan sesuai standar
-- info: catatan atau saran
-
-Kategori yang WAJIB digunakan (pilih yang paling sesuai):
-- "Typo" — kesalahan ketik: huruf ganda, huruf hilang, kata duplikat, spasi salah (WAJIB isi teks_salah dan seharusnya)
-- "Artefak Copy-Paste" — teks dari laporan lain yang tidak relevan
-- "Penomoran" — inkonsistensi penomoran tabel/gambar/sub-bab
-- "Placeholder" — nilai belum diisi: Rp xx, tabel kosong
-- "Nama Perusahaan" — inkonsistensi nama/ejaan perusahaan
-- "Ejaan & Penulisan" — inkonsistensi ejaan (batu bara/batubara), singkatan, format penulisan
-- "Logis/Substansi" — inkonsistensi logis: duplikasi teks, judul vs isi, alamat ganda
-- "Konsistensi Nilai" — angka tidak konsisten antar bagian
-- "Konsistensi Tanggal" — tanggal tidak konsisten
-- "Konsistensi Alamat" — alamat tidak konsisten
-- "KEPI/SPI/POJK" — ketidaksesuaian standar
-- "Formula Resume" — kesalahan perhitungan matematis
-- "Lain-lain" — kategori lain
-
-overall_score: 0-100 (100 = sempurna tanpa kritikal/minor)."""
+CATATAN PENTING:
+- Untuk kategori "Typo": WAJIB isi teks_salah dan seharusnya
+- Untuk kategori "Konsistensi Nilai": isi teks_salah dengan nilai yang salah, seharusnya dengan nilai yang benar
+- Sebutkan nomor halaman dan/atau bab yang spesifik di page_hint
+- Kutip teks asli dalam tanda petik di field detail
+- overall_score: 100 = sempurna, kurangi ~10 per temuan kritis, ~5 per mayor, ~2 per minor"""
 
 
 # ══════════════════════════════════════════════
@@ -1783,19 +1855,34 @@ def render_finding_card(f: dict):
 
 
 def render_summary_cards(s: dict):
-    score = s.get("overall_score", 0)
-    sc    = "#1a9e67" if score >= 80 else "#d4860a" if score >= 60 else "#c0392b"
-    c1, c2, c3, c4 = st.columns(4)
+    score  = s.get("overall_score", 0)
+    sc     = "#1a9e67" if score >= 80 else "#d4860a" if score >= 60 else "#c0392b"
+    kritis = s.get("kritis", 0) + s.get("kritikal", 0)
+    mayor  = s.get("mayor", 0)
+    minor  = s.get("minor", 0)
+    status = s.get("status", "")
+    status_color = "#1a9e67" if "LULUS" in status else "#e67e22" if "MINOR" in status else "#c0392b"
+
+    # Status banner
+    if status:
+        st.markdown(f"""
+<div style="background:{status_color}11;border:1px solid {status_color}44;border-radius:8px;
+            padding:8px 16px;margin-bottom:12px;text-align:center;">
+    <span style="font-size:13px;font-weight:700;color:{status_color};">{status}</span>
+</div>""", unsafe_allow_html=True)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
     for col, num, label, color, bg in [
-        (c1, score,              "Skor QC",    sc,        "#f8fafb"),
-        (c2, s.get("kritikal",0),"🔴 Kritikal","#c0392b", "#fff0f0"),
-        (c3, s.get("minor",0),  "🟡 Minor",   "#d4860a", "#fff8e6"),
-        (c4, s.get("ok",0),     "🟢 Sesuai",  "#1a9e67", "#edfaf4"),
+        (c1, score,  "Skor QC",     sc,        "#f8fafb"),
+        (c2, kritis, "🔴 Kritis",   "#c0392b", "#fff0f0"),
+        (c3, mayor,  "🟠 Mayor",    "#e67e22", "#fff5ec"),
+        (c4, minor,  "🟡 Minor",    "#d4860a", "#fff8e6"),
+        (c5, s.get("ok", 0), "🟢 Sesuai", "#1a9e67", "#edfaf4"),
     ]:
         col.markdown(f"""
-<div style="background:{bg};border:1px solid #dde3ea;border-radius:10px;padding:16px;
+<div style="background:{bg};border:1px solid #dde3ea;border-radius:10px;padding:14px 8px;
             text-align:center;box-shadow:0 1px 4px rgba(0,0,0,0.06);">
-    <div style="font-size:32px;font-weight:800;color:{color};font-family:monospace;">{num}</div>
+    <div style="font-size:28px;font-weight:800;color:{color};font-family:monospace;">{num}</div>
     <div style="font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:1px;">{label}</div>
 </div>""", unsafe_allow_html=True)
 
@@ -2019,16 +2106,32 @@ def render_findings_as_sections(findings: list, all_pages: list):
             continue
 
         # Section header
+        n = sec['num']
+        header_label = f"BAGIAN {n} — {sec['title']}" if n != "—" else sec['title']
+        # Count kritis/mayor/minor in this section
+        sev_counts = {}
+        for f in items:
+            sv = f.get("severity", "info")
+            if sv in ("kritis", "kritikal"): sv = "kritis"
+            sev_counts[sv] = sev_counts.get(sv, 0) + 1
+        pills = ""
+        for sv, clr in [("kritis","#c0392b"),("mayor","#e67e22"),("minor","#d4860a")]:
+            if sev_counts.get(sv, 0):
+                pills += (f'<span style="background:{clr}22;color:{clr};border:1px solid {clr};'
+                          f'font-size:10px;font-weight:700;padding:1px 8px;border-radius:10px;'
+                          f'margin-left:8px;">{SEVERITY_CONFIG[sv]["emoji"]} {sev_counts[sv]}</span>')
+
         st.markdown(f"""
-<div style="margin-top:28px;margin-bottom:12px;">
-    <span style="font-size:15px;font-weight:800;color:#1a1a2e;letter-spacing:-0.3px;">
-        {sec['num']}. {sec['title']}
-    </span>
+<div style="margin-top:32px;margin-bottom:10px;display:flex;align-items:center;gap:0;
+            border-bottom:2px solid #1a1a2e;padding-bottom:6px;">
+    <span style="font-size:14px;font-weight:800;color:#1a1a2e;letter-spacing:-0.2px;
+                 text-transform:uppercase;">{header_label}</span>
+    {pills}
 </div>""", unsafe_allow_html=True)
 
         style = sec["style"]
 
-        # ── Narrative style (for Artefak Copy-Paste / Section 2) ──
+        # ── Narrative style (for Artefak Copy-Paste / Bagian B) ──
         if style == "narrative":
             # Show warning box
             st.markdown("""
@@ -2090,7 +2193,40 @@ def render_findings_as_sections(findings: list, all_pages: list):
             continue
 
         # ── Table styles ──
-        if style == "table_typo":
+        if style == "table_angka":
+            # Bagian A: No | Lokasi | Masalah | Teks Salah | Seharusnya
+            headers = ["No", "Lokasi", "Masalah", "Ditemukan", "Seharusnya"]
+            rows_html = ""
+            for i, f in enumerate(items, 1):
+                sev = f.get("severity", "mayor")
+                if sev in ("kritis", "kritikal"): sev = "kritis"
+                badge = severity_badge(sev)
+                lokasi = f.get("page_hint", "—")
+                masalah = f.get("title", "—")
+                teks_salah = f.get("teks_salah") or ""
+                seharusnya = f.get("seharusnya") or ""
+                if not teks_salah and not seharusnya:
+                    teks_salah = f.get("detail", "")[:200]
+                rows_html += (
+                    f'<tr>'
+                    f'<td style="{TD_NO_STYLE}">{i}</td>'
+                    f'<td style="{TD_LOKASI_STYLE}">{lokasi} {badge}</td>'
+                    f'<td style="{TD_STYLE};font-weight:600;">{bold_text(masalah)}</td>'
+                    f'<td style="{TD_STYLE}"><code style="font-size:12px;background:#fff5f5;'
+                    f'padding:1px 4px;border-radius:3px;color:#c0392b;">{teks_salah}</code></td>'
+                    f'<td style="{TD_STYLE}"><code style="font-size:12px;background:#f0fff4;'
+                    f'padding:1px 4px;border-radius:3px;color:#1a9e67;">{seharusnya}</code></td>'
+                    f'</tr>'
+                )
+            st.markdown(f"""
+<table style="{TABLE_STYLE}">
+<thead><tr>
+{''.join(f'<th style="{TH_STYLE}">{h}</th>' for h in headers)}
+</tr></thead>
+<tbody>{rows_html}</tbody>
+</table>""", unsafe_allow_html=True)
+
+        elif style == "table_typo":
             headers = ["No", "Lokasi", "Teks Salah", "Seharusnya", "Keterangan"]
             rows_html = ""
             for i, f in enumerate(items, 1):
@@ -2685,14 +2821,19 @@ div[data-testid="stExpander"] { background: #fff; border: 1px solid #dde3ea; bor
 
             # Summary cards — gabung AI + lokal
             summary = result.get("summary", {})
-            total_kritikal = summary.get("kritikal", 0) + local_result["n_kritikal"]
-            total_minor    = summary.get("minor", 0)    + local_result["n_minor"]
+            # Support both new (kritis/mayor) and old (kritikal) field names
+            ai_kritis = summary.get("kritis", 0) + summary.get("kritikal", 0)
+            ai_mayor  = summary.get("mayor", 0)
+            ai_minor  = summary.get("minor", 0)
+            total_kritis = ai_kritis + local_result["n_kritikal"]
+            total_minor  = ai_minor  + local_result["n_minor"]
             merged_summary = {
                 **summary,
-                "kritikal": total_kritikal,
-                "minor":    total_minor,
+                "kritis":  total_kritis,
+                "mayor":   ai_mayor,
+                "minor":   total_minor,
                 "overall_score": max(0, summary.get("overall_score", 80)
-                                     - local_result["n_kritikal"] * 5
+                                     - local_result["n_kritikal"] * 8
                                      - local_result["n_minor"] * 2),
             }
             render_summary_cards(merged_summary)
